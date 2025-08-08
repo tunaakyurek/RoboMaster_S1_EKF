@@ -1,5 +1,5 @@
-#Virtual environment
-ven/
+# Virtual environment
+venv/
 
 # Python bytecode
 __pycache__/
