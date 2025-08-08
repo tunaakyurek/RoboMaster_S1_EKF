@@ -4,12 +4,11 @@ import time
 
 def main():
     ep_robot = robot.Robot()
-    # Use 'sta' and the IP you discovered:
-    ep_robot.initialize(conn_type='sta', ip='172.20.10.15')
-    print("Connected to RoboMaster S1 over hotspot!")
+    ep_robot.initialize(conn_type='sta', ip='172.20.10.11')
+    print("Connected to RoboMaster S1 at 172.20.10.11!")
     for i in range(5):
         pos = ep_robot.chassis.get_position()
-        print(f"[{i}] Position: x={pos[0]:.2f}, y={pos[1]:.2f}, yaw={pos[2]:.1f}")
+        print(f"[{i}] x={pos[0]:.2f}, y={pos[1]:.2f}, yaw={pos[2]:.1f}")
         time.sleep(1)
     ep_robot.close()
 
