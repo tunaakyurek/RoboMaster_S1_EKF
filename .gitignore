@@ -1,6 +1,9 @@
-# Python venv
-venv/
+#Virtual environment
+ven/
+
+# Python bytecode
 __pycache__/
 *.py[cod]
-*.log
-venv
+
+# Log files
+logs/*.log
