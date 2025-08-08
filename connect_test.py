@@ -4,7 +4,7 @@ import time
 
 def main():
     ep_robot = robot.Robot()
-    ep_robot.initialize(conn_type='sta', ip='172.20.10.11')
+    ep_robot.initialize(conn_type='sta')
     print("Connected to RoboMaster S1 at 172.20.10.11!")
     for i in range(5):
         pos = ep_robot.chassis.get_position()
