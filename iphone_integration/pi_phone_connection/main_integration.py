@@ -20,13 +20,10 @@ import time
 import threading
 import queue
 import os
+import sys
 from datetime import datetime
 from typing import Optional, Dict, Any
 import numpy as np
-
-# Import our modules
-from iphone_sensor_receiver import iPhoneDataReceiver, iPhoneDataProcessor, iPhoneSensorData
-from ekf_8dof_formulary import EKF8DOF, EKF8State
 
 # Configure logging
 logging.basicConfig(
@@ -34,6 +31,25 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Import our modules
+try:
+    # Try relative imports first (when imported as module)
+    from .iphone_sensor_receiver import iPhoneDataReceiver, iPhoneDataProcessor, iPhoneSensorData
+    from .ekf_8dof_formulary import EKF8DOF, EKF8State
+except ImportError:
+    # Fall back to direct imports (when run as script)
+    from iphone_sensor_receiver import iPhoneDataReceiver, iPhoneDataProcessor, iPhoneSensorData
+    from ekf_8dof_formulary import EKF8DOF, EKF8State
+
+# Add path for autonomous controller (optional component)
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'robomaster_control'))
+try:
+    from autonomous_controller import AutonomousController, ControlMode, Waypoint
+    AUTONOMOUS_AVAILABLE = True
+except ImportError:
+    AUTONOMOUS_AVAILABLE = False
+    logger.warning("Autonomous controller not available")
 
 
 class iPhoneEKFIntegration:
@@ -60,6 +76,14 @@ class iPhoneEKFIntegration:
         self.processor = iPhoneDataProcessor()
         
         self.ekf = EKF8DOF(self.config.get('ekf_config', {}))
+        
+        # Optional autonomous controller
+        self.autonomous_controller = None
+        if AUTONOMOUS_AVAILABLE and self.config.get('enable_autonomous', False):
+            self.autonomous_controller = AutonomousController(
+                self.config.get('autonomous_config', {})
+            )
+            logger.info("Autonomous controller initialized")
         
         # Data logging
         self.log_dir = self.config.get('log_dir', '../data')
@@ -289,6 +313,10 @@ class iPhoneEKFIntegration:
                             'raw_sensor': sensor_data
                         })
                     
+                    # Update autonomous controller if available
+                    if self.autonomous_controller:
+                        self.autonomous_controller.update_state(state)
+                    
                     # Call state callback
                     if self.state_callback:
                         self.state_callback(state)
@@ -418,6 +446,34 @@ class iPhoneEKFIntegration:
         """Reset EKF to initial conditions"""
         self.ekf.reset(initial_state)
         logger.info("EKF reset")
+    
+    def get_control_command(self, timeout: float = 0.1):
+        """
+        Get control command from autonomous controller
+        
+        Args:
+            timeout: Timeout for getting command
+            
+        Returns:
+            Control command or None if autonomous controller not available
+        """
+        if self.autonomous_controller:
+            return self.autonomous_controller.get_command(timeout)
+        return None
+    
+    def set_autonomous_mode(self, mode: str):
+        """
+        Set autonomous controller mode
+        
+        Args:
+            mode: Control mode ('idle', 'waypoint', 'hover', etc.)
+        """
+        if self.autonomous_controller and AUTONOMOUS_AVAILABLE:
+            mode_enum = ControlMode(mode)
+            self.autonomous_controller.set_mode(mode_enum)
+            logger.info(f"Autonomous mode set to: {mode}")
+        else:
+            logger.warning("Autonomous controller not available")
 
 
 # Command-line interface

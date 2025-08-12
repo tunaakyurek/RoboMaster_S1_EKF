@@ -231,15 +231,24 @@ class AutonomousController:
             output_limit=(-self.max_yaw_rate, self.max_yaw_rate)
         )
     
-    def update_state(self, state: Dict[str, Any]):
+    def update_state(self, state):
         """
         Update current state from EKF
         
         Args:
-            state: State dictionary containing position, orientation, etc.
+            state: State dictionary or EKF8State object containing position, orientation, etc.
         """
         with self.state_lock:
-            self.current_state = state
+            # Handle both dictionary and EKF8State object
+            if hasattr(state, 'to_array'):  # EKF8State object
+                self.current_state = {
+                    'position': [state.x, state.y, state.z],
+                    'velocity': [0.0, 0.0, state.vz],  # Only vz available in 8-DOF
+                    'orientation': [state.roll, state.pitch, state.yaw],
+                    'angular_velocity': [0.0, 0.0, state.yaw_rate]  # Only yaw_rate in 8-DOF
+                }
+            else:  # Dictionary
+                self.current_state = state
     
     def set_mode(self, mode: ControlMode):
         """
