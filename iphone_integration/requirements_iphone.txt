@@ -5,13 +5,13 @@
 # the iPhone-EKF integration system
 ###############################################
 
-# Core scientific computing
-numpy==1.24.3        # Array operations and linear algebra
-scipy==1.10.1        # Scientific computing (signal processing, stats)
+# Core scientific computing (Raspberry Pi compatible versions)
+numpy>=1.24.0,<1.25.0        # Array operations and linear algebra
+scipy>=1.10.0,<1.12.0        # Scientific computing (signal processing, stats)
 
 # Data analysis and visualization
-matplotlib==3.7.1    # Plotting and visualization
-pandas==2.0.2        # Data analysis and CSV handling
+matplotlib>=3.7.0,<3.8.0     # Plotting and visualization
+pandas>=2.0.0,<2.1.0         # Data analysis and CSV handling
 
 # Optional: For 3D visualization
 # mpl_toolkits comes with matplotlib

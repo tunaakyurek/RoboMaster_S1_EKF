@@ -161,10 +161,10 @@ def verify_dependencies():
     print("=" * 60)
     
     required_packages = {
-        'numpy': '1.24.3',
-        'scipy': '1.10.1',
-        'matplotlib': '3.7.1',
-        'pandas': '2.0.2'
+        'numpy': '1.24.0',      # Minimum required
+        'scipy': '1.10.0',      # Minimum required
+        'matplotlib': '3.7.0',  # Minimum required
+        'pandas': '2.0.0'       # Minimum required
     }
     
     results = []
@@ -173,13 +173,23 @@ def verify_dependencies():
             module = importlib.import_module(package)
             version = getattr(module, '__version__', 'unknown')
             
-            # Check version compatibility
-            if version.startswith(required_version.split('.')[0]):
-                results.append((package, True, f"v{version}"))
-                print(f"✅ {package}: v{version} (required: {required_version})")
-            else:
-                results.append((package, True, f"v{version} (required: {required_version})"))
-                print(f"⚠️  {package}: v{version} (required: {required_version})")
+            # Check version compatibility (semantic versioning)
+            try:
+                from packaging import version as pkg_version
+                if pkg_version.parse(version) >= pkg_version.parse(required_version):
+                    results.append((package, True, f"v{version}"))
+                    print(f"✅ {package}: v{version} (required: >={required_version})")
+                else:
+                    results.append((package, False, f"v{version} too old (required: >={required_version})"))
+                    print(f"❌ {package}: v{version} too old (required: >={required_version})")
+            except ImportError:
+                # Fallback to simple string comparison if packaging is not available
+                if version.split('.')[0] >= required_version.split('.')[0]:
+                    results.append((package, True, f"v{version}"))
+                    print(f"✅ {package}: v{version} (required: >={required_version})")
+                else:
+                    results.append((package, True, f"v{version} (check manually)"))
+                    print(f"⚠️  {package}: v{version} (required: >={required_version})")
                 
         except ImportError:
             results.append((package, False, "Not installed"))
