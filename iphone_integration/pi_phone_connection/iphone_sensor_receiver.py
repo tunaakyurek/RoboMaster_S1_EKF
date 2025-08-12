@@ -308,6 +308,10 @@ class iPhoneDataReceiver:
         if timestamp is None:
             # Try common SensorLog timestamps
             timestamp = get_num(json_data, 'motionTimestamp_sinceReboot', None)
+            if timestamp is None:
+                timestamp = get_num(json_data, 'accelerometerTimestamp_sinceReboot', None)
+            if timestamp is None:
+                timestamp = get_num(json_data, 'gyroTimestamp_sinceReboot', None)
         if timestamp is None:
             timestamp = time.time()
 
@@ -390,8 +394,22 @@ class iPhoneDataReceiver:
         yaw = get_num(json_data, 'motionYaw', None)
         if roll is None:
             roll = get_num(json_data, 'roll', None)
-            pitch = get_num(json_data, 'pitch', pitch)
-            yaw = get_num(json_data, 'yaw', yaw)
+        if pitch is None:
+            pitch = get_num(json_data, 'pitch', None)
+        if yaw is None:
+            yaw = get_num(json_data, 'yaw', None)
+        
+        # Handle missing heading information
+        if yaw is None:
+            heading = get_num(json_data, 'motionHeading', None)
+            if heading is None:
+                heading = get_num(json_data, 'locationTrueHeading', None)
+                if heading is None:
+                    heading = get_num(json_data, 'locationMagneticHeading', None)
+            if heading is not None:
+                # Convert heading (0-360°) to yaw (-π to π)
+                import math
+                yaw = math.radians(heading - 180.0)  # Convert to NED yaw convention
 
         # Build dataclass
         return iPhoneSensorData(
