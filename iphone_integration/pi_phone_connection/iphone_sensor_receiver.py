@@ -171,6 +171,8 @@ class iPhoneDataReceiver:
         """UDP receiver thread"""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Increase buffer size to handle larger packets
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
         sock.bind(('', self.port))
         sock.settimeout(1.0)  # 1 second timeout for checking stop flag
         
@@ -178,7 +180,7 @@ class iPhoneDataReceiver:
         
         while self.is_running:
             try:
-                data, addr = sock.recvfrom(4096)
+                data, addr = sock.recvfrom(8192)  # Increased from 4096
                 self._process_raw_data(data)
             except socket.timeout:
                 continue
@@ -243,8 +245,19 @@ class iPhoneDataReceiver:
     def _process_raw_data(self, data: bytes):
         """Process raw data from iPhone"""
         try:
-            # Decode JSON data
-            json_data = json.loads(data.decode('utf-8'))
+            # Decode and clean the data
+            raw_text = data.decode('utf-8', errors='ignore').strip()
+            
+            # Try to find complete JSON objects
+            if raw_text.startswith('{') and raw_text.endswith('}'):
+                try:
+                    json_data = json.loads(raw_text)
+                except json.JSONDecodeError as e:
+                    logger.debug(f"JSON decode error: {e}, data length: {len(raw_text)}")
+                    return
+            else:
+                logger.debug(f"Data doesn't look like JSON: {raw_text[:100]}...")
+                return
             
             # Parse into iPhoneSensorData
             sensor_data = self._parse_json_data(json_data)
@@ -275,52 +288,138 @@ class iPhoneDataReceiver:
                 self.data_callback(sensor_data)
             
         except Exception as e:
-            logger.error(f"Error processing data: {e}")
+            logger.debug(f"Error processing data: {e}, data length: {len(data)}")
     
     def _parse_json_data(self, json_data: Dict) -> iPhoneSensorData:
-        """Parse JSON data into iPhoneSensorData object"""
+        """Parse JSON (SensorLog or custom) into iPhoneSensorData object"""
+        def get_num(d: Dict, key: str, default: Optional[float] = None) -> Optional[float]:
+            v = d.get(key, default)
+            if v is None:
+                return None
+            try:
+                return float(v)
+            except Exception:
+                return default
+
+        g = 9.81
+
+        # Timestamp: prefer provided unix timestamp; otherwise, now
+        timestamp = get_num(json_data, 'timestamp', None)
+        if timestamp is None:
+            # Try common SensorLog timestamps
+            timestamp = get_num(json_data, 'motionTimestamp_sinceReboot', None)
+        if timestamp is None:
+            timestamp = time.time()
+
+        # Accelerometer (m/s^2)
+        # Preference order:
+        # 1) accelerometerAcceleration* (in g) → convert to m/s^2
+        # 2) motionGravity* + motionUserAcceleration* (both in g) → sum and convert
+        # 3) motionGravity* (g) → convert
+        # 4) motionUserAcceleration* (g) → convert
+        ax = ay = az = None
+        acc_ax = get_num(json_data, 'accelerometerAccelerationX', None)
+        acc_ay = get_num(json_data, 'accelerometerAccelerationY', None)
+        acc_az = get_num(json_data, 'accelerometerAccelerationZ', None)
+        if acc_ax is not None and acc_ay is not None and acc_az is not None:
+            ax, ay, az = acc_ax * g, acc_ay * g, acc_az * g
+        else:
+            grav_x = get_num(json_data, 'motionGravityX', None)
+            grav_y = get_num(json_data, 'motionGravityY', None)
+            grav_z = get_num(json_data, 'motionGravityZ', None)
+            user_x = get_num(json_data, 'motionUserAccelerationX', None)
+            user_y = get_num(json_data, 'motionUserAccelerationY', None)
+            user_z = get_num(json_data, 'motionUserAccelerationZ', None)
+            if None not in (grav_x, grav_y, grav_z, user_x, user_y, user_z):
+                ax, ay, az = (grav_x + user_x) * g, (grav_y + user_y) * g, (grav_z + user_z) * g
+            elif None not in (grav_x, grav_y, grav_z):
+                ax, ay, az = grav_x * g, grav_y * g, grav_z * g
+            elif None not in (user_x, user_y, user_z):
+                ax, ay, az = user_x * g, user_y * g, user_z * g
+
+        # Fallback to custom keys if present
+        if ax is None:
+            ax = get_num(json_data, 'accel_x', 0.0)
+            ay = get_num(json_data, 'accel_y', 0.0)
+            az = get_num(json_data, 'accel_z', 0.0)
+
+        # Gyroscope (rad/s)
+        gx = get_num(json_data, 'gyroRotationX', None)
+        gy = get_num(json_data, 'gyroRotationY', None)
+        gz = get_num(json_data, 'gyroRotationZ', None)
+        if None in (gx, gy, gz):
+            gx = get_num(json_data, 'motionRotationRateX', gx)
+            gy = get_num(json_data, 'motionRotationRateY', gy)
+            gz = get_num(json_data, 'motionRotationRateZ', gz)
+        if None in (gx, gy, gz):
+            gx = get_num(json_data, 'gyro_x', gx or 0.0)
+            gy = get_num(json_data, 'gyro_y', gy or 0.0)
+            gz = get_num(json_data, 'gyro_z', gz or 0.0)
+
+        # Magnetometer (μT)
+        mx = get_num(json_data, 'magnetometerX', None)
+        my = get_num(json_data, 'magnetometerY', None)
+        mz = get_num(json_data, 'magnetometerZ', None)
+        if None in (mx, my, mz):
+            mx = get_num(json_data, 'mag_x', mx)
+            my = get_num(json_data, 'mag_y', my)
+            mz = get_num(json_data, 'mag_z', mz)
+
+        # GPS
+        lat = get_num(json_data, 'locationLatitude', None)
+        lon = get_num(json_data, 'locationLongitude', None)
+        alt = get_num(json_data, 'locationAltitude', None)
+        acc = get_num(json_data, 'locationHorizontalAccuracy', None)
+        if lat is None:
+            lat = get_num(json_data, 'gps_lat', None)
+            lon = get_num(json_data, 'gps_lon', None)
+            alt = get_num(json_data, 'gps_alt', alt)
+            acc = get_num(json_data, 'gps_accuracy', acc)
+
+        # Barometer
+        pressure = get_num(json_data, 'altimeterPressure', None)
+        altitude_baro = get_num(json_data, 'altimeterRelativeAltitude', None)
+        if pressure is None:
+            pressure = get_num(json_data, 'pressure', None)
+        if altitude_baro is None:
+            altitude_baro = get_num(json_data, 'altitude', None)
+
+        # Orientation (radians, if provided)
+        roll = get_num(json_data, 'motionRoll', None)
+        pitch = get_num(json_data, 'motionPitch', None)
+        yaw = get_num(json_data, 'motionYaw', None)
+        if roll is None:
+            roll = get_num(json_data, 'roll', None)
+            pitch = get_num(json_data, 'pitch', pitch)
+            yaw = get_num(json_data, 'yaw', yaw)
+
+        # Build dataclass
         return iPhoneSensorData(
-            timestamp=json_data.get('timestamp', time.time()),
-            
-            # Accelerometer (required)
-            accel_x=json_data.get('accel_x', 0.0),
-            accel_y=json_data.get('accel_y', 0.0),
-            accel_z=json_data.get('accel_z', 0.0),
-            
-            # Gyroscope (required)
-            gyro_x=json_data.get('gyro_x', 0.0),
-            gyro_y=json_data.get('gyro_y', 0.0),
-            gyro_z=json_data.get('gyro_z', 0.0),
-            
-            # Magnetometer (optional)
-            mag_x=json_data.get('mag_x'),
-            mag_y=json_data.get('mag_y'),
-            mag_z=json_data.get('mag_z'),
-            
-            # GPS (optional)
-            gps_lat=json_data.get('gps_lat'),
-            gps_lon=json_data.get('gps_lon'),
-            gps_alt=json_data.get('gps_alt'),
-            gps_accuracy=json_data.get('gps_accuracy'),
-            
-            # Barometer (optional)
-            pressure=json_data.get('pressure'),
-            altitude=json_data.get('altitude'),
-            
-            # Orientation (optional)
-            roll=json_data.get('roll'),
-            pitch=json_data.get('pitch'),
-            yaw=json_data.get('yaw'),
-            
-            # User acceleration (optional)
-            user_accel_x=json_data.get('user_accel_x'),
-            user_accel_y=json_data.get('user_accel_y'),
-            user_accel_z=json_data.get('user_accel_z'),
-            
-            # Gravity (optional)
-            gravity_x=json_data.get('gravity_x'),
-            gravity_y=json_data.get('gravity_y'),
-            gravity_z=json_data.get('gravity_z')
+            timestamp=timestamp,
+            accel_x=ax or 0.0,
+            accel_y=ay or 0.0,
+            accel_z=az or 0.0,
+            gyro_x=gx or 0.0,
+            gyro_y=gy or 0.0,
+            gyro_z=gz or 0.0,
+            mag_x=mx,
+            mag_y=my,
+            mag_z=mz,
+            gps_lat=lat,
+            gps_lon=lon,
+            gps_alt=alt,
+            gps_accuracy=acc,
+            pressure=pressure,
+            altitude=altitude_baro,
+            roll=roll,
+            pitch=pitch,
+            yaw=yaw,
+            user_accel_x=get_num(json_data, 'motionUserAccelerationX', None),
+            user_accel_y=get_num(json_data, 'motionUserAccelerationY', None),
+            user_accel_z=get_num(json_data, 'motionUserAccelerationZ', None),
+            gravity_x=get_num(json_data, 'motionGravityX', None),
+            gravity_y=get_num(json_data, 'motionGravityY', None),
+            gravity_z=get_num(json_data, 'motionGravityZ', None),
         )
     
     def get_latest_data(self) -> Optional[iPhoneSensorData]:
