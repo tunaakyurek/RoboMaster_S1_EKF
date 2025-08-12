@@ -181,6 +181,7 @@ class iPhoneDataReceiver:
         while self.is_running:
             try:
                 data, addr = sock.recvfrom(8192)  # Increased from 4096
+                logger.info(f"Received {len(data)} bytes from {addr}")
                 self._process_raw_data(data)
             except socket.timeout:
                 continue
@@ -247,16 +248,19 @@ class iPhoneDataReceiver:
         try:
             # Decode and clean the data
             raw_text = data.decode('utf-8', errors='ignore').strip()
+            logger.info(f"Raw data preview: {raw_text[:200]}...")
             
             # Try to find complete JSON objects
             if raw_text.startswith('{') and raw_text.endswith('}'):
                 try:
                     json_data = json.loads(raw_text)
+                    logger.info(f"Successfully parsed JSON with {len(json_data)} fields")
                 except json.JSONDecodeError as e:
-                    logger.debug(f"JSON decode error: {e}, data length: {len(raw_text)}")
+                    logger.error(f"JSON decode error: {e}, data length: {len(raw_text)}")
+                    logger.error(f"Problematic data: {raw_text}")
                     return
             else:
-                logger.debug(f"Data doesn't look like JSON: {raw_text[:100]}...")
+                logger.error(f"Data doesn't look like JSON: {raw_text[:100]}...")
                 return
             
             # Parse into iPhoneSensorData
