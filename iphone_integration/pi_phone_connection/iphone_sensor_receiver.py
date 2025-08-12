@@ -133,6 +133,11 @@ class iPhoneDataReceiver:
         self.last_packet_time = 0
         self.data_rate = 0
         
+        # JSON message reconstruction for fragmented packets
+        self.json_buffer = ""
+        self.buffer_timeout = 1.0  # Clear buffer if no data for 1 second
+        self.last_fragment_time = 0
+        
         logger.info(f"iPhone receiver initialized: {connection_type} on port {port}")
     
     def start(self, callback: Optional[Callable] = None):
@@ -244,55 +249,92 @@ class iPhoneDataReceiver:
         server_sock.close()
     
     def _process_raw_data(self, data: bytes):
-        """Process raw data from iPhone"""
+        """Process raw data from iPhone with JSON fragment reassembly"""
         try:
-            # Decode and clean the data
+            # Decode the incoming data
             raw_text = data.decode('utf-8', errors='ignore').strip()
-            logger.info(f"Raw data preview: {raw_text[:200]}...")
-            
-            # Try to find complete JSON objects
-            if raw_text.startswith('{') and raw_text.endswith('}'):
-                try:
-                    json_data = json.loads(raw_text)
-                    logger.info(f"Successfully parsed JSON with {len(json_data)} fields")
-                except json.JSONDecodeError as e:
-                    logger.error(f"JSON decode error: {e}, data length: {len(raw_text)}")
-                    logger.error(f"Problematic data: {raw_text}")
-                    return
-            else:
-                logger.error(f"Data doesn't look like JSON: {raw_text[:100]}...")
-                return
-            
-            # Parse into iPhoneSensorData
-            sensor_data = self._parse_json_data(json_data)
-            
-            # Update statistics
-            self.packets_received += 1
             current_time = time.time()
-            if self.last_packet_time > 0:
-                dt = current_time - self.last_packet_time
-                self.data_rate = 0.9 * self.data_rate + 0.1 * (1.0 / dt)
-            self.last_packet_time = current_time
             
-            # Store latest data
-            self.latest_data = sensor_data
+            # Clear buffer if timeout exceeded (new message starting)
+            if current_time - self.last_fragment_time > self.buffer_timeout:
+                self.json_buffer = ""
             
-            # Add to queue (drop oldest if full)
-            if self.data_queue.full():
+            self.last_fragment_time = current_time
+            
+            # Add this fragment to buffer
+            self.json_buffer += raw_text
+            
+            logger.debug(f"Fragment: {raw_text[:100]}... (buffer size: {len(self.json_buffer)})")
+            
+            # Check if we have a complete JSON message
+            complete_messages = []
+            buffer_pos = 0
+            brace_count = 0
+            start_pos = -1
+            
+            for i, char in enumerate(self.json_buffer):
+                if char == '{':
+                    if brace_count == 0:
+                        start_pos = i
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0 and start_pos >= 0:
+                        # Found complete JSON object
+                        json_text = self.json_buffer[start_pos:i+1]
+                        complete_messages.append(json_text)
+                        buffer_pos = i + 1
+            
+            # Remove processed messages from buffer
+            if buffer_pos > 0:
+                self.json_buffer = self.json_buffer[buffer_pos:]
+            
+            # Process each complete JSON message
+            for json_text in complete_messages:
                 try:
-                    self.data_queue.get_nowait()
-                    self.packets_dropped += 1
-                except:
-                    pass
+                    json_data = json.loads(json_text)
+                    logger.info(f"✅ Complete JSON parsed with {len(json_data)} fields")
+                    
+                    # Parse into iPhoneSensorData
+                    sensor_data = self._parse_json_data(json_data)
+                    
+                    # Update statistics
+                    self.packets_received += 1
+                    current_time = time.time()
+                    if self.last_packet_time > 0:
+                        dt = current_time - self.last_packet_time
+                        self.data_rate = 0.9 * self.data_rate + 0.1 * (1.0 / dt)
+                    self.last_packet_time = current_time
+                    
+                    # Store latest data
+                    self.latest_data = sensor_data
+                    
+                    # Add to queue (drop oldest if full)
+                    if self.data_queue.full():
+                        try:
+                            self.data_queue.get_nowait()
+                            self.packets_dropped += 1
+                        except:
+                            pass
+                    
+                    self.data_queue.put(sensor_data)
+                    
+                    # Call callback if provided
+                    if self.data_callback:
+                        self.data_callback(sensor_data)
+                        
+                except json.JSONDecodeError as e:
+                    logger.error(f"JSON decode error: {e}")
+                    logger.debug(f"Problematic JSON: {json_text[:200]}...")
             
-            self.data_queue.put(sensor_data)
-            
-            # Call callback if provided
-            if self.data_callback:
-                self.data_callback(sensor_data)
+            # Log buffer status
+            if len(complete_messages) == 0:
+                logger.debug(f"Incomplete JSON, buffering... (buffer: {len(self.json_buffer)} chars)")
             
         except Exception as e:
-            logger.debug(f"Error processing data: {e}, data length: {len(data)}")
+            logger.error(f"Error processing data: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _parse_json_data(self, json_data: Dict) -> iPhoneSensorData:
         """Parse JSON (SensorLog or custom) into iPhoneSensorData object"""
