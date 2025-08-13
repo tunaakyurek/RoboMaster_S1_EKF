@@ -22,7 +22,7 @@ import numpy as np
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # Enable debug logging
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -296,12 +296,18 @@ class RoboMasterEKFIntegration:
             return
         
         # Process raw data
-        processed_data = self.processor.process(data)
+        try:
+            processed_data = self.processor.process(data)
+            logger.debug(f"Processed data keys: {list(processed_data.keys())}")
+        except Exception as e:
+            logger.error(f"Data processing failed: {e}")
+            return
         
         # Add to queue for EKF processing
         if not self.state_queue.full():
             self.state_queue.put((data, processed_data))
             self.stats['packets_processed'] += 1
+            logger.debug(f"Added data to queue, packets_processed: {self.stats['packets_processed']}")
         else:
             logger.warning("State queue full, dropping data")
     
@@ -320,13 +326,25 @@ class RoboMasterEKFIntegration:
                 control_input = self._prepare_control_input(raw_data, processed_data)
                 
                 # Prediction step
-                self.ekf.predict(dt, control_input)
+                try:
+                    self.ekf.predict(dt, control_input)
+                    logger.debug(f"Prediction successful, dt={dt:.3f}, control={control_input}")
+                except Exception as e:
+                    logger.error(f"Prediction failed: {e}")
+                    continue
                 
                 # Update step with IMU
-                self._update_with_imu(raw_data, processed_data)
+                try:
+                    self._update_with_imu(raw_data, processed_data)
+                    logger.debug("IMU update successful")
+                except Exception as e:
+                    logger.error(f"IMU update failed: {e}")
                 
                 # Update with GPS if available
-                self._update_with_gps(raw_data, processed_data)
+                try:
+                    self._update_with_gps(raw_data, processed_data)
+                except Exception as e:
+                    logger.error(f"GPS update failed: {e}")
                 
                 # Get current state
                 current_state = self.ekf.get_state()
