@@ -194,6 +194,9 @@ class RoboMasterEKFIntegration:
         # Stop receiver
         self.receiver.stop()
         
+        # Small delay to ensure clean shutdown
+        time.sleep(0.5)
+        
         # Process calibration data
         if len(self.calibration_data) >= min_samples:
             self._process_calibration_data()
@@ -314,11 +317,14 @@ class RoboMasterEKFIntegration:
     def _ekf_processing_loop(self):
         """Main EKF processing loop following RoboMaster formulary"""
         last_time = time.time()
+        logger.info("🔄 EKF processing loop started")
         
         while self.is_running:
             try:
                 # Get sensor data
+                logger.debug(f"Waiting for data from queue (size: {self.state_queue.qsize()})")
                 raw_data, processed_data = self.state_queue.get(timeout=0.1)
+                logger.debug("✅ Got data from queue")
                 current_time = time.time()
                 dt = current_time - last_time
                 
