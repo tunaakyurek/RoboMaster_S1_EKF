@@ -22,7 +22,7 @@ import numpy as np
 
 # Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,  # Enable debug logging
+    level=logging.INFO,  # Use INFO level for cleaner output
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -176,8 +176,8 @@ class RoboMasterEKFIntegration:
         duration = calibration_config.get('duration', 5.0)
         min_samples = calibration_config.get('min_samples', 100)
         
-        logger.info(f"🔧 Starting {duration}s calibration - keep device STATIONARY")
-        logger.info("   This will estimate accelerometer and gyroscope biases")
+        logger.info(f"✅ Starting {duration}s calibration - keep device STATIONARY")
+        logger.info("✅ This will estimate accelerometer and gyroscope biases")
         
         self.calibration_data = []
         self.calibration_start_time = time.time()
@@ -191,17 +191,17 @@ class RoboMasterEKFIntegration:
             if len(self.calibration_data) >= min_samples:
                 logger.info(f"✅ Collected {len(self.calibration_data)} calibration samples")
         
-        # Stop receiver
+        # Stop receiver temporarily
         self.receiver.stop()
         
-        # Small delay to ensure clean shutdown
+        # Small delay to ensure clean shutdown before restart
         time.sleep(0.5)
         
         # Process calibration data
         if len(self.calibration_data) >= min_samples:
             self._process_calibration_data()
             self.is_calibrated = True
-            logger.info("🔧 Calibration complete - biases estimated")
+            logger.info("✅ Calibration complete - biases estimated")
         else:
             logger.error(f"❌ Insufficient calibration data: {len(self.calibration_data)} < {min_samples}")
             raise RuntimeError("Calibration failed")
@@ -240,7 +240,7 @@ class RoboMasterEKFIntegration:
         # Also update processor calibration for sensor preprocessing
         self.processor.calibrate(self.calibration_data, len(self.calibration_data) * 0.02)
         
-        logger.info(f"Estimated biases: accel=[{bias_accel_x:.3f}, {bias_accel_y:.3f}], gyro={bias_gyro_z:.3f}")
+        logger.info(f"✅ Estimated biases: accel=[{bias_accel_x:.3f}, {bias_accel_y:.3f}], gyro={bias_gyro_z:.3f}")
     
     def start(self, state_callback: Optional[callable] = None):
         """Start the RoboMaster integration system"""
@@ -269,7 +269,7 @@ class RoboMasterEKFIntegration:
             self.log_thread.daemon = True
             self.log_thread.start()
         
-        logger.info("✅ RoboMaster integration system started")
+        logger.info("RoboMaster integration system started")
     
     def stop(self):
         """Stop the integration system"""
@@ -291,7 +291,7 @@ class RoboMasterEKFIntegration:
         # Print final statistics
         self._print_final_stats()
         
-        logger.info("🛑 RoboMaster integration system stopped")
+        logger.info("RoboMaster integration system stopped")
     
     def _sensor_data_callback(self, data: iPhoneSensorData):
         """Process incoming sensor data"""
@@ -301,7 +301,7 @@ class RoboMasterEKFIntegration:
         # Process raw data
         try:
             processed_data = self.processor.process(data)
-            logger.debug(f"Processed data keys: {list(processed_data.keys())}")
+            # logger.debug(f"Processed data keys: {list(processed_data.keys())}")  # Commented for cleaner output
         except Exception as e:
             logger.error(f"Data processing failed: {e}")
             return
@@ -310,21 +310,21 @@ class RoboMasterEKFIntegration:
         if not self.state_queue.full():
             self.state_queue.put((data, processed_data))
             self.stats['packets_processed'] += 1
-            logger.debug(f"Added data to queue, packets_processed: {self.stats['packets_processed']}")
+            # logger.debug(f"Added data to queue, packets_processed: {self.stats['packets_processed']}")  # Commented for cleaner output
         else:
             logger.warning("State queue full, dropping data")
     
     def _ekf_processing_loop(self):
         """Main EKF processing loop following RoboMaster formulary"""
         last_time = time.time()
-        logger.info("🔄 EKF processing loop started")
+        logger.info("EKF processing loop started")
         
         while self.is_running:
             try:
                 # Get sensor data
-                logger.debug(f"Waiting for data from queue (size: {self.state_queue.qsize()})")
+                # logger.debug(f"Waiting for data from queue (size: {self.state_queue.qsize()})")  # Commented for cleaner output
                 raw_data, processed_data = self.state_queue.get(timeout=0.1)
-                logger.debug("✅ Got data from queue")
+                # logger.debug("Got data from queue")  # Commented for cleaner output
                 current_time = time.time()
                 dt = current_time - last_time
                 
@@ -334,7 +334,7 @@ class RoboMasterEKFIntegration:
                 # Prediction step
                 try:
                     self.ekf.predict(dt, control_input)
-                    logger.debug(f"Prediction successful, dt={dt:.3f}, control={control_input}")
+                    # logger.debug(f"Prediction successful, dt={dt:.3f}, control={control_input}")  # Commented for cleaner output
                 except Exception as e:
                     logger.error(f"Prediction failed: {e}")
                     continue
@@ -342,7 +342,7 @@ class RoboMasterEKFIntegration:
                 # Update step with IMU
                 try:
                     self._update_with_imu(raw_data, processed_data)
-                    logger.debug("IMU update successful")
+                    # logger.debug("IMU update successful")  # Commented for cleaner output
                 except Exception as e:
                     logger.error(f"IMU update failed: {e}")
                 
@@ -477,7 +477,7 @@ class RoboMasterEKFIntegration:
         try:
             self.log_writer = open(self.log_file, 'w')
             self.log_writer.write(header)
-            logger.info(f"📝 RoboMaster log file created: {self.log_file}")
+            logger.info(f"RoboMaster log file created: {self.log_file}")
         except Exception as e:
             logger.error(f"Failed to create log file: {e}")
             self.log_file = None
@@ -542,7 +542,7 @@ class RoboMasterEKFIntegration:
         runtime = time.time() - self.stats['start_time'] if self.stats['start_time'] else 0
         avg_rate = self.stats['ekf_updates'] / runtime if runtime > 0 else 0
         
-        logger.info("📊 Final RoboMaster Statistics:")
+        logger.info("Final RoboMaster Statistics:")
         logger.info(f"   Runtime: {runtime:.1f} seconds")
         logger.info(f"   EKF updates: {self.stats['ekf_updates']}")
         logger.info(f"   Packets processed: {self.stats['packets_processed']}")
@@ -591,14 +591,14 @@ def main():
         # Start system
         integration.start(state_callback)
         
-        logger.info("🚀 RoboMaster system running. Press Ctrl+C to stop...")
-        logger.info("📱 Start iPhone sensor streaming to this device")
+        logger.info("RoboMaster system running. Press Ctrl+C to stop...")
+        logger.info("Start iPhone sensor streaming to this device")
         
         while True:
             time.sleep(1)
     
     except KeyboardInterrupt:
-        logger.info("🛑 Stopping...")
+        logger.info("Stopping...")
         integration.stop()
 
 
