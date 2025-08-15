@@ -316,6 +316,9 @@ class EnhancediPhoneEKFIntegration:
                 # Update with barometer if available
                 self._update_with_barometer(raw_data, processed_data)
                 
+                # Apply constraint updates for robust yaw estimation
+                self.ekf.apply_constraint_updates()
+                
                 # Get current state
                 current_state = self.ekf.get_state()
                 
@@ -355,7 +358,8 @@ class EnhancediPhoneEKFIntegration:
         """Update EKF with magnetometer measurements"""
         if 'mag' in processed_data:
             mag = np.array(processed_data['mag'])
-            self.ekf.update_magnetometer(mag)
+            # Use the new magnetometer yaw update method
+            self.ekf.update_magnetometer_yaw(mag)
     
     def _update_with_gps(self, raw_data: iPhoneSensorData, processed_data: Dict):
         """Update EKF with GPS measurements"""
@@ -363,12 +367,6 @@ class EnhancediPhoneEKFIntegration:
             gps_data = processed_data['gps']
             if all(k in gps_data for k in ['lat', 'lon']):
                 self._handle_gps_update(gps_data)
-    
-    def _update_with_barometer(self, raw_data: iPhoneSensorData, processed_data: Dict):
-        """Update EKF with barometer measurements"""
-        if 'baro' in processed_data:
-            altitude = processed_data['baro']
-            self.ekf.update_barometer(altitude)
     
     def _handle_gps_update(self, gps_data: Dict):
         """Handle GPS updates with coordinate conversion"""
@@ -389,8 +387,25 @@ class EnhancediPhoneEKFIntegration:
         y_gps = (lon - self.gps_reference['lon']) * lon_to_m
         z_gps = gps_data.get('altitude', 0.0)
         
-        gps_pos = np.array([x_gps, y_gps, z_gps])
-        self.ekf.update_gps(gps_pos)
+        # Update position
+        gps_pos = np.array([x_gps, y_gps])
+        self.ekf.update_gps_position(gps_pos)
+        
+        # Update velocity if available
+        if 'velocity' in gps_data and len(gps_data['velocity']) >= 2:
+            vx_gps = gps_data['velocity'][0]
+            vy_gps = gps_data['velocity'][1]
+            gps_vel = np.array([vx_gps, vy_gps])
+            self.ekf.update_gps_velocity(gps_vel)
+        
+        # Apply constraint updates after GPS updates
+        self.ekf.apply_constraint_updates()
+    
+    def _update_with_barometer(self, raw_data: iPhoneSensorData, processed_data: Dict):
+        """Update EKF with barometer measurements"""
+        if 'baro' in processed_data:
+            altitude = processed_data['baro']
+            self.ekf.update_barometer(altitude)
     
     def _update_autonomous_controller(self, state: EKFDroneState):
         """Update autonomous controller with current state"""
@@ -480,7 +495,7 @@ class EnhancediPhoneEKFIntegration:
     
     def _print_status(self, state: EKFDroneState):
         """Print periodic status updates"""
-        runtime = time.time() - self.stats['start_time']
+        runtime = time.time() - self.stats['start_time'] if self.stats['start_time'] else 0
         rate = self.stats['ekf_updates'] / runtime if runtime > 0 else 0
         
         logger.info(f"Stats: EKF updates={self.stats['ekf_updates']}, "

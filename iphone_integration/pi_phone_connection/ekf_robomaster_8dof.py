@@ -144,6 +144,10 @@ class RoboMasterEKF8DOF:
         self.update_count = 0
         self.prediction_count = 0
         
+        # Store last GPS velocity for course calculation
+        self.last_gps_vel = None
+        self.last_gps_time = None
+        
         logger.info("RoboMaster 8-DOF EKF initialized following exact formulary specifications")
     
     def _compute_discrete_process_noise(self, dt: float) -> np.ndarray:
@@ -335,8 +339,15 @@ class RoboMasterEKF8DOF:
             H[0, 3] = -np.sin(theta)                            # ∂h/∂vx
             H[0, 4] = np.cos(theta)                             # ∂h/∂vy
             
-            self._kalman_update(z, h, H, self.R_nhc)
-            logger.debug(f"NHC update applied: speed={speed:.2f} m/s, lateral_vel={h[0]:.3f} m/s")
+            # Only apply if the theta derivative is significant
+            theta_derivative = abs(-np.cos(theta) * vx - np.sin(theta) * vy)
+            if theta_derivative > 0.1:  # Only apply if theta is observable
+                self._kalman_update(z, h, H, self.R_nhc)
+                logger.debug(f"NHC update applied: speed={speed:.2f} m/s, lateral_vel={h[0]:.3f} m/s, theta_deriv={theta_derivative:.3f}")
+            else:
+                logger.debug(f"NHC skipped: theta not observable (derivative={theta_derivative:.3f})")
+        else:
+            logger.debug(f"NHC skipped: speed={speed:.2f} m/s, yaw_rate={abs(self.x[7]):.3f} rad/s")
 
     def update_zero_velocity(self, speed_threshold: float = 0.1):
         """
@@ -421,7 +432,83 @@ class RoboMasterEKF8DOF:
         # Kalman update
         self._kalman_update(z, h, H, self.R_gps_vel)
         
+        # Store GPS velocity for course calculation
+        self.last_gps_vel = gps_vel.copy()
+        self.last_gps_time = time.time()
+        
         logger.debug(f"GPS velocity update: {gps_vel}")
+    
+    def update_gps_course_yaw(self, speed_threshold: float = 0.7):
+        """
+        Update yaw using GPS course when speed is sufficient.
+        This provides absolute heading measurements, solving the yaw observability issue.
+        
+        Args:
+            speed_threshold: Minimum speed to use GPS course (m/s)
+        """
+        if self.last_gps_vel is None:
+            return
+        
+        # Calculate speed from GPS velocity
+        speed = np.linalg.norm(self.last_gps_vel)
+        
+        if speed > speed_threshold:
+            # Calculate course angle from GPS velocity
+            vx_gps, vy_gps = self.last_gps_vel
+            yaw_course = np.arctan2(vy_gps, vx_gps)
+            
+            # Update yaw with GPS course measurement
+            self.update_yaw(yaw_course)
+            
+            logger.debug(f"GPS course yaw update: {np.degrees(yaw_course):.1f}° (speed: {speed:.2f} m/s)")
+    
+    def update_magnetometer_yaw(self, mag_vector: np.ndarray):
+        """
+        Update yaw using magnetometer measurements.
+        This provides absolute heading measurements for yaw observability.
+        
+        Args:
+            mag_vector: Magnetometer vector [mx, my, mz] in body frame
+        """
+        if len(mag_vector) < 2:
+            return
+        
+        # Calculate yaw from magnetometer (assuming phone is level)
+        # For a level phone, yaw = atan2(my, mx) in body frame
+        # This gives heading relative to magnetic north
+        mx, my = mag_vector[0], mag_vector[1]
+        
+        # Apply calibration if available (simplified for now)
+        # In practice, you'd want to calibrate for hard/soft iron effects
+        yaw_mag = np.arctan2(my, mx)
+        
+        # Update yaw with magnetometer measurement
+        self.update_yaw(yaw_mag)
+        
+        logger.debug(f"Magnetometer yaw update: {np.degrees(yaw_mag):.1f}°")
+    
+    def apply_constraint_updates(self, speed_threshold: float = 0.1, yaw_rate_threshold: float = 0.05):
+        """
+        Apply all constraint-based updates automatically.
+        This includes NHC, ZUPT, and ZARU updates for robust yaw estimation.
+        
+        Args:
+            speed_threshold: Speed threshold for ZUPT (m/s)
+            yaw_rate_threshold: Angular rate threshold for ZARU (rad/s)
+        """
+        # Apply non-holonomic constraint when moving
+        self.update_non_holonomic_constraint()
+        
+        # Apply zero-velocity update when stopped
+        self.update_zero_velocity(speed_threshold)
+        
+        # Apply zero-angular-rate update when not rotating
+        self.update_zero_angular_rate(yaw_rate_threshold)
+        
+        # Apply GPS course yaw update if GPS velocity is available
+        self.update_gps_course_yaw()
+        
+        logger.debug("Applied all constraint updates")
     
     def _kalman_update(self, z: np.ndarray, h: np.ndarray, H: np.ndarray, R: np.ndarray):
         """
@@ -553,9 +640,7 @@ if __name__ == "__main__":
         ekf.predict(dt, control)
         
         # Apply NHC, ZUPT, ZARU updates
-        ekf.update_non_holonomic_constraint()
-        ekf.update_zero_velocity()
-        ekf.update_zero_angular_rate()
+        ekf.apply_constraint_updates()
         
         # Simulated GPS updates every 10 steps
         if i % 10 == 0:
