@@ -116,14 +116,23 @@ class RoboMasterEKF8DOF:
         self.P[5:7, 5:7] *= config.get('init_accel_bias_var', 0.01)  # Accel bias uncertainty
         self.P[7, 7] = config.get('init_gyro_bias_var', 0.001)   # Gyro bias uncertainty
         
-        # Process noise covariance Q (following formulary)
-        self.Q = self._create_process_noise_matrix(config)
+        # Continuous-time process noise PSD parameters (following formulary)
+        # q_accel: white acceleration PSD (per axis) [m^2/s^3]
+        # q_gyro: white gyro noise PSD (yaw) [rad^2/s^3]
+        # q_accel_bias: accel bias random-walk PSD [(m/s^2)^2/s]
+        # q_gyro_bias: gyro bias random-walk PSD [(rad/s)^2/s]
+        self.q_accel = config.get('q_accel', 0.5)
+        self.q_gyro = config.get('q_gyro', 0.01)
+        self.q_accel_bias = config.get('q_accel_bias', config.get('q_accel_bias', 1e-6))
+        self.q_gyro_bias = config.get('q_gyro_bias', config.get('q_gyro_bias', 1e-8))
         
         # Measurement noise covariances R (following formulary)
+        # Note: IMU is not used as a direct measurement update; kept for compatibility if needed externally
         self.R_accel = np.eye(2) * config.get('r_accel', 0.1)   # Accelerometer noise (2D)
         self.R_gyro = np.array([[config.get('r_gyro', 0.01)]])  # Gyroscope noise (1D)
         self.R_gps_pos = np.eye(2) * config.get('r_gps_pos', 1.0)     # GPS position noise
         self.R_gps_vel = np.eye(2) * config.get('r_gps_vel', 0.5)     # GPS velocity noise
+        self.R_yaw = np.array([[config.get('r_yaw', 0.5)]])           # Magnetometer-derived yaw noise
         
         # Physical constants
         self.gravity = config.get('gravity', 9.81)  # m/s²
@@ -134,27 +143,44 @@ class RoboMasterEKF8DOF:
         
         logger.info("RoboMaster 8-DOF EKF initialized following exact formulary specifications")
     
-    def _create_process_noise_matrix(self, config: Dict) -> np.ndarray:
+    def _compute_discrete_process_noise(self, dt: float) -> np.ndarray:
         """
-        Create process noise covariance matrix Q following formulary
+        Discretize continuous-time process noise (PSD) into discrete Qd for dt.
+        State ordering: [x, y, theta, vx, vy, bias_ax, bias_ay, bias_omega]
+        - For each position-velocity axis, use the classic constant-acceleration model:
+          Qd_posvel = [[(dt^3)/3*q_a, (dt^2)/2*q_a],
+                        [(dt^2)/2*q_a, dt*q_a]]
+        - For theta (driven by gyro noise): Qd_theta = dt*q_gyro
+        - For biases (random walk): Qd_bias = dt*q_bias
         """
-        Q = np.zeros((self.n_states, self.n_states))
+        Qd = np.zeros((self.n_states, self.n_states))
+        dt2 = dt * dt
+        dt3 = dt2 * dt
+        q_a = self.q_accel
         
-        # Process noise parameters (from formulary or config)
-        q_pos = config.get('q_position', 0.01)          # Position process noise
-        q_theta = config.get('q_theta', 0.01)           # Orientation process noise
-        q_vel = config.get('q_velocity', 0.1)           # Velocity process noise
-        q_accel_bias = config.get('q_accel_bias', 1e-6) # Accelerometer bias drift
-        q_gyro_bias = config.get('q_gyro_bias', 1e-8)   # Gyroscope bias drift
+        # X-axis [pos x (0), vel x (3)]
+        Qd[0, 0] += (dt3 / 3.0) * q_a
+        Qd[0, 3] += (dt2 / 2.0) * q_a
+        Qd[3, 0] += (dt2 / 2.0) * q_a
+        Qd[3, 3] += dt * q_a
         
-        # Set diagonal elements
-        Q[0:2, 0:2] = np.eye(2) * q_pos         # Position noise
-        Q[2, 2] = q_theta                       # Orientation noise
-        Q[3:5, 3:5] = np.eye(2) * q_vel         # Velocity noise
-        Q[5:7, 5:7] = np.eye(2) * q_accel_bias  # Accelerometer bias drift
-        Q[7, 7] = q_gyro_bias                   # Gyroscope bias drift
+        # Y-axis [pos y (1), vel y (4)]
+        Qd[1, 1] += (dt3 / 3.0) * q_a
+        Qd[1, 4] += (dt2 / 2.0) * q_a
+        Qd[4, 1] += (dt2 / 2.0) * q_a
+        Qd[4, 4] += dt * q_a
         
-        return Q
+        # Theta (yaw) driven by gyro white noise
+        Qd[2, 2] += dt * self.q_gyro
+        
+        # Accelerometer bias random walk
+        Qd[5, 5] += dt * self.q_accel_bias
+        Qd[6, 6] += dt * self.q_accel_bias
+        
+        # Gyro bias random walk
+        Qd[7, 7] += dt * self.q_gyro_bias
+        
+        return Qd
     
     def predict(self, dt: float, control_input: Optional[np.ndarray] = None):
         """
@@ -211,8 +237,9 @@ class RoboMasterEKF8DOF:
         # Compute state transition Jacobian
         F = self._compute_state_jacobian(dt, control_input)
         
-        # Predict covariance: P = F * P * F^T + Q
-        self.P = F @ self.P @ F.T + self.Q * dt
+        # Predict covariance: P = F * P * F^T + Qd
+        Qd = self._compute_discrete_process_noise(dt)
+        self.P = F @ self.P @ F.T + Qd
         
         self.prediction_count += 1
         
@@ -263,31 +290,23 @@ class RoboMasterEKF8DOF:
     
     def update_imu(self, accel_body: np.ndarray, gyro_z: float):
         """
-        Update with IMU measurements following formulary sensor model
-        
-        Args:
-            accel_body: Body frame acceleration [ax, ay] (m/s²)
-            gyro_z: Angular velocity measurement (rad/s)
+        Deprecated: IMU should be used only in the prediction step, not as a measurement.
+        Kept for backward compatibility but performs no update.
         """
-        # Measurement vector
-        z = np.concatenate([accel_body, [gyro_z]])
-        
-        # Expected measurements
-        h = self._compute_expected_imu()
-        
-        # Measurement Jacobian
-        H = self._compute_imu_jacobian()
-        
-        # Combined measurement noise
-        R = np.block([
-            [self.R_accel, np.zeros((2, 1))],
-            [np.zeros((1, 2)), self.R_gyro]
-        ])
-        
-        # Kalman update
-        self._kalman_update(z, h, H, R)
-        
-        logger.debug("RoboMaster IMU update completed")
+        logger.debug("IMU measurement update is disabled to maintain independence from prediction inputs")
+
+    def update_yaw(self, yaw_measurement: float):
+        """
+        Update orientation (theta) using an external yaw measurement (e.g., magnetometer-derived).
+        Args:
+            yaw_measurement: Measured yaw angle in radians (wrapped to [-pi, pi])
+        """
+        z = np.array([yaw_measurement])
+        h = np.array([self.x[2]])
+        H = np.zeros((1, self.n_states))
+        H[0, 2] = 1.0
+        self._kalman_update(z, h, H, self.R_yaw)
+        logger.debug(f"Yaw update with measurement={yaw_measurement:.3f} rad")
     
     def _compute_expected_imu(self) -> np.ndarray:
         """

@@ -339,12 +339,11 @@ class RoboMasterEKFIntegration:
                     logger.error(f"Prediction failed: {e}")
                     continue
                 
-                # Update step with IMU
+                # Yaw update using magnetometer/heading if available
                 try:
-                    self._update_with_imu(raw_data, processed_data)
-                    # logger.debug("IMU update successful")  # Commented for cleaner output
+                    self._update_with_yaw(raw_data, processed_data)
                 except Exception as e:
-                    logger.error(f"IMU update failed: {e}")
+                    logger.error(f"Yaw update failed: {e}")
                 
                 # Update with GPS if available
                 try:
@@ -395,17 +394,20 @@ class RoboMasterEKFIntegration:
         
         return np.array([ax_body, ay_body, omega_z])
     
-    def _update_with_imu(self, raw_data: iPhoneSensorData, processed_data: Dict):
-        """Update EKF with IMU measurements"""
-        if 'accel' in processed_data and 'gyro' in processed_data:
-            accel = np.array(processed_data['accel'])
-            gyro = np.array(processed_data['gyro'])
-            
-            # Use first two accelerometer components and yaw gyro
-            accel_body = accel[0:2]  # [ax, ay]
-            gyro_z = gyro[2]         # omega_z
-            
-            self.ekf.update_imu(accel_body, gyro_z)
+    def _update_with_yaw(self, raw_data: iPhoneSensorData, processed_data: Dict):
+        """Update EKF with yaw measurement from magnetometer/heading if present"""
+        yaw_meas = None
+        # Prefer directly provided yaw (radians)
+        if raw_data.yaw is not None:
+            yaw_meas = raw_data.yaw
+        else:
+            # Derive yaw from device headings if available (already converted in receiver)
+            # Note: receiver converts heading degrees to yaw radians when possible
+            if raw_data.yaw is not None:
+                yaw_meas = raw_data.yaw
+        
+        if yaw_meas is not None:
+            self.ekf.update_yaw(yaw_meas)
     
     def _update_with_gps(self, raw_data: iPhoneSensorData, processed_data: Dict):
         """Update EKF with GPS measurements"""
