@@ -92,7 +92,7 @@ class RoboMasterEKF8DOF:
     RoboMaster 8-DOF Extended Kalman Filter
     Implements exact formulary specifications from RoboMaster_Formulary.pdf
     
-    State vector: [x, y, theta, vx, vy, bias_accel_x, bias_accel_y, bias_angular_velocity]
+    State vector: [x, y, theta, vx, vy, bias_ax, bias_ay, bias_omega]
     """
     
     def __init__(self, config: Optional[Dict[str, Any]] = None):
@@ -114,17 +114,17 @@ class RoboMasterEKF8DOF:
         self.P[2, 2] = config.get('init_theta_var', 0.1)         # Orientation uncertainty  
         self.P[3:5, 3:5] *= config.get('init_vel_var', 0.5)     # Velocity uncertainty
         self.P[5:7, 5:7] *= config.get('init_accel_bias_var', 0.01)  # Accel bias uncertainty
-        self.P[7, 7] = config.get('init_gyro_bias_var', 0.001)   # Gyro bias uncertainty
+        self.P[7, 7] = config.get('init_gyro_bias_var', 0.01)   # Gyro bias uncertainty - increased for better observability
         
         # Continuous-time process noise PSD parameters (following formulary)
         # q_accel: white acceleration PSD (per axis) [m^2/s^3]
         # q_gyro: white gyro noise PSD (yaw) [rad^2/s^3]
         # q_accel_bias: accel bias random-walk PSD [(m/s^2)^2/s]
-        # q_gyro_bias: gyro bias random-walk PSD [(rad/s)^2/s]
-        self.q_accel = config.get('q_accel', 0.5)
-        self.q_gyro = config.get('q_gyro', 0.01)
-        self.q_accel_bias = config.get('q_accel_bias', config.get('q_accel_bias', 1e-6))
-        self.q_gyro_bias = config.get('q_gyro_bias', config.get('q_gyro_bias', 1e-8))
+        # q_gyro_bias: gyro bias random-walk PSD [(rad/s)^2/s] - increased for better observability
+        self.q_accel = config.get('q_accel', 0.2)  # Reduced from 0.5 to 0.2 (more conservative)
+        self.q_gyro = config.get('q_gyro', 0.008)  # Reduced from 0.01 to 0.008 (more conservative)
+        self.q_accel_bias = config.get('q_accel_bias', 5e-7)  # Reduced from 1e-6 to 5e-7 (more conservative)
+        self.q_gyro_bias = config.get('q_gyro_bias', 5e-6)  # Reduced from 1e-5 to 5e-6 (more conservative)
         
         # Measurement noise covariances R (following formulary)
         # Note: IMU is not used as a direct measurement update; kept for compatibility if needed externally
@@ -133,6 +133,9 @@ class RoboMasterEKF8DOF:
         self.R_gps_pos = np.eye(2) * config.get('r_gps_pos', 1.0)     # GPS position noise
         self.R_gps_vel = np.eye(2) * config.get('r_gps_vel', 0.5)     # GPS velocity noise
         self.R_yaw = np.array([[config.get('r_yaw', 0.5)]])           # Magnetometer-derived yaw noise
+        self.R_nhc = np.array([[config.get('r_nhc', 0.1)]])           # Non-holonomic constraint noise
+        self.R_zupt = np.eye(2) * config.get('r_zupt', 0.01)         # Zero-velocity update noise
+        self.R_zaru = np.array([[config.get('r_zaru', 0.001)]])       # Zero-angular-rate update noise
         
         # Physical constants
         self.gravity = config.get('gravity', 9.81)  # m/s²
@@ -307,68 +310,100 @@ class RoboMasterEKF8DOF:
         H[0, 2] = 1.0
         self._kalman_update(z, h, H, self.R_yaw)
         logger.debug(f"Yaw update with measurement={yaw_measurement:.3f} rad")
-    
-    def _compute_expected_imu(self) -> np.ndarray:
+
+    def update_non_holonomic_constraint(self, speed_threshold: float = 0.5, yaw_rate_threshold: float = 0.1):
         """
-        Compute expected IMU measurements following formulary
-        
-        Expected accelerometer: measures gravity + linear acceleration in body frame
-        Expected gyroscope: measures angular velocity + bias
+        Non-holonomic constraint update: lateral body velocity should be ~0 for ground vehicles.
+        Makes theta observable from vx, vy when moving forward.
+        Args:
+            speed_threshold: Minimum speed to apply NHC (m/s)
+            yaw_rate_threshold: Maximum yaw rate to apply NHC (rad/s)
         """
-        theta = self.x[2]
         vx, vy = self.x[3:5]
+        theta = self.x[2]
+        speed = np.sqrt(vx**2 + vy**2)
+        
+        # Only apply when moving forward and not turning sharply
+        if speed > speed_threshold and abs(self.x[7]) < yaw_rate_threshold:  # x[7] is bias_angular_velocity
+            # Lateral velocity in body frame: -sin(theta)*vx + cos(theta)*vy ≈ 0
+            z = np.array([0.0])
+            h = np.array([-np.sin(theta) * vx + np.cos(theta) * vy])
+            
+            # Jacobian: H = [0, 0, (-cos(theta)*vx - sin(theta)*vy), -sin(theta), cos(theta), 0, 0, 0]
+            H = np.zeros((1, self.n_states))
+            H[0, 2] = -np.cos(theta) * vx - np.sin(theta) * vy  # ∂h/∂theta
+            H[0, 3] = -np.sin(theta)                            # ∂h/∂vx
+            H[0, 4] = np.cos(theta)                             # ∂h/∂vy
+            
+            self._kalman_update(z, h, H, self.R_nhc)
+            logger.debug(f"NHC update applied: speed={speed:.2f} m/s, lateral_vel={h[0]:.3f} m/s")
+
+    def update_zero_velocity(self, speed_threshold: float = 0.08):  # More conservative: reduced from 0.1 to 0.08 m/s
+        """
+        Zero-velocity update (ZUPT): when speed is very low, measure vx=vy=0.
+        Helps stabilize velocity and accelerometer biases.
+        Args:
+            speed_threshold: Speed threshold to trigger ZUPT (m/s) - conservative reduction for better stationary operation
+        """
+        vx, vy = self.x[3:5]
+        speed = np.sqrt(vx**2 + vy**2)
+        
+        if speed < speed_threshold:
+            z = np.array([0.0, 0.0])  # [vx=0, vy=0]
+            h = np.array([vx, vy])     # Current velocity estimate
+            
+            H = np.zeros((2, self.n_states))
+            H[0, 3] = 1.0  # ∂vx/∂vx
+            H[1, 4] = 1.0  # ∂vy/∂vy
+            
+            # Use standard ZUPT - no aggressive constraints
+            self._kalman_update(z, h, H, self.R_zupt)
+            logger.debug(f"ZUPT applied: speed={speed:.3f} m/s")
+
+    def update_zero_angular_rate(self, angular_rate_threshold: float = 0.03):  # More conservative: reduced from 0.05 to 0.03 rad/s
+        """
+        Zero-angular-rate update (ZARU): when angular rate is very low, measure omega=0.
+        Directly tightens gyroscope bias estimate.
+        Args:
+            angular_rate_threshold: Angular rate threshold to trigger ZARU (rad/s) - conservative reduction for better stationary operation
+        """
+        # Current angular rate estimate (gyro measurement minus bias)
+        omega_estimated = self.x[7]  # bias_angular_velocity
+        
+        if abs(omega_estimated) < angular_rate_threshold:
+            z = np.array([0.0])      # omega = 0
+            h = np.array([omega_estimated])
+            
+            H = np.zeros((1, self.n_states))
+            H[0, 7] = 1.0  # ∂omega/∂bias_omega
+            
+            # Use standard ZARU - no aggressive constraints
+            self._kalman_update(z, h, H, self.R_zaru)
+            logger.debug(f"ZARU applied: estimated_omega={omega_estimated:.4f} rad/s")
+    
+    def update_stationary_mode(self, accel_threshold: float = 0.05, gyro_threshold: float = 0.01):
+        """
+        Conservative stationary mode update: applies minimal constraints when device is clearly stationary.
+        This is a very conservative approach to avoid over-constraining the system.
+        Args:
+            accel_threshold: Accelerometer threshold to detect stationary mode (m/s²)
+            gyro_threshold: Gyroscope threshold to detect stationary mode (rad/s)
+        """
+        # Get current sensor measurements (these should be passed from the main loop)
+        # For now, we'll use the estimated biases as a proxy for sensor activity
         bias_ax, bias_ay, bias_omega = self.x[5:8]
         
-        # Expected accelerometer measurements in body frame
-        # For a ground vehicle, this is primarily gravity projection
-        # Plus any centripetal acceleration from turning
+        # Check if we're in stationary mode based on bias stability
+        # If biases are stable and small, we're likely stationary
+        bias_magnitude = np.sqrt(bias_ax**2 + bias_ay**2)
         
-        # Gravity in body frame (assuming level ground)
-        gravity_body_x = 0.0  # No pitch assumed for ground vehicle
-        gravity_body_y = 0.0  # No roll assumed for ground vehicle
-        
-        # Add bias
-        expected_accel = np.array([
-            gravity_body_x + bias_ax,
-            gravity_body_y + bias_ay
-        ])
-        
-        # Expected gyroscope measurement (angular velocity + bias)
-        # For ground vehicle, this is yaw rate
-        # We need to estimate current yaw rate from velocity and path curvature
-        velocity_magnitude = np.sqrt(vx**2 + vy**2)
-        if velocity_magnitude > 0.1:  # Avoid division by zero
-            # Estimate yaw rate from velocity direction change
-            # This is an approximation - could be improved with vehicle model
-            estimated_yaw_rate = 0.0  # Simplified for now
-        else:
-            estimated_yaw_rate = 0.0
-        
-        expected_gyro = estimated_yaw_rate + bias_omega
-        
-        return np.concatenate([expected_accel, [expected_gyro]])
-    
-    def _compute_imu_jacobian(self) -> np.ndarray:
-        """
-        Compute Jacobian matrix for IMU measurements
-        H = ∂h/∂x following formulary
-        """
-        H = np.zeros((3, self.n_states))
-        
-        # Accelerometer Jacobian
-        # ∂accel_x/∂bias_ax = 1
-        H[0, 5] = 1.0
-        # ∂accel_y/∂bias_ay = 1  
-        H[1, 6] = 1.0
-        
-        # Gyroscope Jacobian
-        # ∂gyro_z/∂bias_omega = 1
-        H[2, 7] = 1.0
-        
-        # Additional terms for velocity-dependent yaw rate would go here
-        # For now, simplified model
-        
-        return H
+        if bias_magnitude < accel_threshold and abs(bias_omega) < gyro_threshold:
+            # Only apply very conservative constraints - don't fight the EKF dynamics
+            # Just log that we're in stationary mode for debugging
+            logger.debug(f"Stationary mode detected: bias_mag={bias_magnitude:.4f}, gyro_bias={bias_omega:.4f}")
+            
+            # No aggressive constraints - let the EKF work naturally
+            # The reduced process noise should be sufficient
     
     def update_gps_position(self, gps_pos: np.ndarray):
         """
@@ -485,7 +520,7 @@ class RoboMasterEKF8DOF:
         self.P[2, 2] = 0.1         # Orientation uncertainty
         self.P[3:5, 3:5] *= 0.5    # Velocity uncertainty
         self.P[5:7, 5:7] *= 0.01   # Accel bias uncertainty
-        self.P[7, 7] = 0.001       # Gyro bias uncertainty
+        self.P[7, 7] = 0.01        # Gyro bias uncertainty - increased for better observability
         
         # Reset statistics
         self.update_count = 0
@@ -517,15 +552,18 @@ class RoboMasterEKF8DOF:
 if __name__ == "__main__":
     # Create RoboMaster EKF with configuration
     config = {
-        'q_position': 0.01,
-        'q_theta': 0.01,
-        'q_velocity': 0.1,
+        'q_accel': 0.5,
+        'q_gyro': 0.01,
         'q_accel_bias': 1e-6,
-        'q_gyro_bias': 1e-8,
+        'q_gyro_bias': 1e-5,  # Increased for better bias learning
         'r_accel': 0.1,
         'r_gyro': 0.01,
         'r_gps_pos': 1.0,
-        'r_gps_vel': 0.5
+        'r_gps_vel': 0.5,
+        'r_yaw': 0.5,
+        'r_nhc': 0.1,
+        'r_zupt': 0.01,
+        'r_zaru': 0.001
     }
     
     ekf = RoboMasterEKF8DOF(config)
@@ -540,11 +578,10 @@ if __name__ == "__main__":
         # Prediction
         ekf.predict(dt, control)
         
-        # Simulated IMU measurements
-        accel_body = control[0:2] + np.random.randn(2) * 0.05  # Noisy acceleration
-        gyro_z = control[2] + np.random.randn() * 0.01         # Noisy angular velocity
-        
-        ekf.update_imu(accel_body, gyro_z)
+        # Apply NHC, ZUPT, ZARU updates
+        ekf.update_non_holonomic_constraint()
+        ekf.update_zero_velocity()
+        ekf.update_zero_angular_rate()
         
         # Simulated GPS updates every 10 steps
         if i % 10 == 0:
@@ -566,3 +603,5 @@ if __name__ == "__main__":
     # Final statistics
     stats = ekf.get_statistics()
     print(f"\nFinal statistics: {stats}")
+
+

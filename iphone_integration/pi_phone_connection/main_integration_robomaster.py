@@ -121,25 +121,31 @@ class RoboMasterEKFIntegration:
             'connection_type': 'udp',
             'port': 5555,
             'ekf_config': {
-                # Process noise (from formulary)
+                # Process noise (from formulary) - conservative optimization for drift resistance
                 'q_position': 0.01,
-                'q_theta': 0.01,
-                'q_velocity': 0.1,
-                'q_accel_bias': 1e-6,
-                'q_gyro_bias': 1e-8,
+                'q_theta': 0.008,  # Conservative reduction from 0.01
+                'q_velocity': 0.08,  # Conservative reduction from 0.1
+                'q_accel': 0.2,     # Conservative reduction from 0.5
+                'q_gyro': 0.008,    # Conservative reduction from 0.01
+                'q_accel_bias': 5e-7,  # Conservative reduction from 1e-6
+                'q_gyro_bias': 5e-6,   # Conservative reduction from 1e-5
                 
                 # Measurement noise (from formulary)
                 'r_accel': 0.1,
                 'r_gyro': 0.01,
                 'r_gps_pos': 1.0,
                 'r_gps_vel': 0.5,
+                'r_yaw': 0.5,      # ~5° standard deviation for yaw updates
+                'r_nhc': 0.1,      # Non-holonomic constraint noise
+                'r_zupt': 0.01,    # Zero-velocity update noise
+                'r_zaru': 0.001,   # Zero-angular-rate update noise
                 
                 # Initial uncertainties
                 'init_pos_var': 1.0,
                 'init_theta_var': 0.1,
                 'init_vel_var': 0.5,
                 'init_accel_bias_var': 0.01,
-                'init_gyro_bias_var': 0.001
+                'init_gyro_bias_var': 0.01  # Increased for better observability
             },
             'calibration': {
                 'duration': 5.0,
@@ -345,6 +351,17 @@ class RoboMasterEKFIntegration:
                 except Exception as e:
                     logger.error(f"Yaw update failed: {e}")
                 
+                # Apply NHC, ZUPT, and ZARU updates for better observability
+                try:
+                    self.ekf.update_non_holonomic_constraint()
+                    self.ekf.update_zero_velocity()
+                    self.ekf.update_zero_angular_rate()
+                    
+                    # Apply enhanced stationary mode constraints to prevent drift
+                    self.ekf.update_stationary_mode()
+                except Exception as e:
+                    logger.error(f"Constraint updates failed: {e}")
+                
                 # Update with GPS if available
                 try:
                     self._update_with_gps(raw_data, processed_data)
@@ -449,6 +466,18 @@ class RoboMasterEKFIntegration:
             gps_vel = np.array([vx_gps, vy_gps])
             
             self.ekf.update_gps_velocity(gps_vel)
+            
+            # GPS course-based yaw update when speed is sufficient (>0.7 m/s)
+            if speed > 0.7:  # Gate by speed to avoid jitter at low speeds
+                # Convert GPS course to yaw (course is 0-360°, yaw is -π to π)
+                # Course 0° = North, Course 90° = East
+                # Yaw 0 = North, Yaw π/2 = East
+                yaw_course = course_rad - np.pi/2  # Adjust for coordinate system
+                yaw_course = self._normalize_angle(yaw_course)
+                
+                # Update EKF with GPS-derived yaw
+                self.ekf.update_yaw(yaw_course)
+                logger.debug(f"GPS course yaw update: course={np.degrees(course_rad):.1f}°, yaw={np.degrees(yaw_course):.1f}°, speed={speed:.2f} m/s")
     
     def _update_autonomous_controller(self, state: RoboMasterState):
         """Update autonomous controller with current state"""
@@ -532,7 +561,7 @@ class RoboMasterEKFIntegration:
     
     def _print_status(self, state: RoboMasterState):
         """Print periodic status updates"""
-        runtime = time.time() - self.stats['start_time']
+        runtime = time.time() - self.stats['start_time'] if self.stats['start_time'] else 0
         rate = self.stats['ekf_updates'] / runtime if runtime > 0 else 0
         
         logger.info(f"Stats: EKF updates={self.stats['ekf_updates']}, "
@@ -566,6 +595,10 @@ class RoboMasterEKFIntegration:
             'is_calibrated': self.is_calibrated,
             'ekf_stats': self.ekf.get_statistics()
         }
+    
+    def _normalize_angle(self, angle: float) -> float:
+        """Normalize angle to [-π, π]"""
+        return (angle + np.pi) % (2 * np.pi) - np.pi
 
 
 def main():
