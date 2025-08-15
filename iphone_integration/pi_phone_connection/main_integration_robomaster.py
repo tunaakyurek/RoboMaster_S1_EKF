@@ -121,14 +121,12 @@ class RoboMasterEKFIntegration:
             'connection_type': 'udp',
             'port': 5555,
             'ekf_config': {
-                # Process noise (from formulary) - conservative optimization for drift resistance
+                # Process noise (from formulary)
                 'q_position': 0.01,
-                'q_theta': 0.008,  # Conservative reduction from 0.01
-                'q_velocity': 0.08,  # Conservative reduction from 0.1
-                'q_accel': 0.2,     # Conservative reduction from 0.5
-                'q_gyro': 0.008,    # Conservative reduction from 0.01
-                'q_accel_bias': 5e-7,  # Conservative reduction from 1e-6
-                'q_gyro_bias': 5e-6,   # Conservative reduction from 1e-5
+                'q_theta': 0.01,
+                'q_velocity': 0.1,
+                'q_accel_bias': 1e-6,
+                'q_gyro_bias': 1e-5,  # Increased for better bias learning
                 
                 # Measurement noise (from formulary)
                 'r_accel': 0.1,
@@ -356,9 +354,6 @@ class RoboMasterEKFIntegration:
                     self.ekf.update_non_holonomic_constraint()
                     self.ekf.update_zero_velocity()
                     self.ekf.update_zero_angular_rate()
-                    
-                    # Apply enhanced stationary mode constraints to prevent drift
-                    self.ekf.update_stationary_mode()
                 except Exception as e:
                     logger.error(f"Constraint updates failed: {e}")
                 
@@ -561,7 +556,7 @@ class RoboMasterEKFIntegration:
     
     def _print_status(self, state: RoboMasterState):
         """Print periodic status updates"""
-        runtime = time.time() - self.stats['start_time'] if self.stats['start_time'] else 0
+        runtime = time.time() - self.stats['start_time']
         rate = self.stats['ekf_updates'] / runtime if runtime > 0 else 0
         
         logger.info(f"Stats: EKF updates={self.stats['ekf_updates']}, "

@@ -121,10 +121,10 @@ class RoboMasterEKF8DOF:
         # q_gyro: white gyro noise PSD (yaw) [rad^2/s^3]
         # q_accel_bias: accel bias random-walk PSD [(m/s^2)^2/s]
         # q_gyro_bias: gyro bias random-walk PSD [(rad/s)^2/s] - increased for better observability
-        self.q_accel = config.get('q_accel', 0.2)  # Reduced from 0.5 to 0.2 (more conservative)
-        self.q_gyro = config.get('q_gyro', 0.008)  # Reduced from 0.01 to 0.008 (more conservative)
-        self.q_accel_bias = config.get('q_accel_bias', 5e-7)  # Reduced from 1e-6 to 5e-7 (more conservative)
-        self.q_gyro_bias = config.get('q_gyro_bias', 5e-6)  # Reduced from 1e-5 to 5e-6 (more conservative)
+        self.q_accel = config.get('q_accel', 0.5)
+        self.q_gyro = config.get('q_gyro', 0.01)
+        self.q_accel_bias = config.get('q_accel_bias', 1e-6)
+        self.q_gyro_bias = config.get('q_gyro_bias', 1e-5)  # Increased from 1e-8 for better bias learning
         
         # Measurement noise covariances R (following formulary)
         # Note: IMU is not used as a direct measurement update; kept for compatibility if needed externally
@@ -222,16 +222,11 @@ class RoboMasterEKF8DOF:
             ay_true = ay_measured - bias_ay
             
             # Transform acceleration from body to global frame
-            # FIXED: Correct coordinate transformation matrix for ground vehicle
-            # Body frame: ax = forward (vehicle's forward direction), ay = lateral (right)
-            # Global frame: X = East, Y = North
             cos_theta = np.cos(theta)
             sin_theta = np.sin(theta)
             
-            # For ground vehicle: forward acceleration maps to both X and Y based on heading
-            # Lateral acceleration maps perpendicular to heading
-            ax_global = ax_true * cos_theta - ay_true * sin_theta  # Forward component in X
-            ay_global = ax_true * sin_theta + ay_true * cos_theta  # Forward component in Y
+            ax_global = ax_true * cos_theta - ay_true * sin_theta
+            ay_global = ax_true * sin_theta + ay_true * cos_theta
             
             self.x[3] = vx + ax_global * dt  # vx += ax_global * dt
             self.x[4] = vy + ay_global * dt  # vy += ay_global * dt
@@ -281,10 +276,9 @@ class RoboMasterEKF8DOF:
             ax_true = ax_meas - bias_ax
             ay_true = ay_meas - bias_ay
             
-            # FIXED: Correct Jacobian derivatives matching the fixed coordinate transformation
-            # ∂vx/∂theta = dt * (-ax_true * sin_theta - ay_true * cos_theta)
+            # ∂vx/∂theta
             F[3, 2] = dt * (-ax_true * sin_theta - ay_true * cos_theta)
-            # ∂vy/∂theta = dt * (ax_true * cos_theta - ay_true * sin_theta)
+            # ∂vy/∂theta  
             F[4, 2] = dt * (ax_true * cos_theta - ay_true * sin_theta)
             
             # ∂vx/∂bias_ax, ∂vx/∂bias_ay
@@ -344,12 +338,12 @@ class RoboMasterEKF8DOF:
             self._kalman_update(z, h, H, self.R_nhc)
             logger.debug(f"NHC update applied: speed={speed:.2f} m/s, lateral_vel={h[0]:.3f} m/s")
 
-    def update_zero_velocity(self, speed_threshold: float = 0.08):  # More conservative: reduced from 0.1 to 0.08 m/s
+    def update_zero_velocity(self, speed_threshold: float = 0.1):
         """
         Zero-velocity update (ZUPT): when speed is very low, measure vx=vy=0.
         Helps stabilize velocity and accelerometer biases.
         Args:
-            speed_threshold: Speed threshold to trigger ZUPT (m/s) - conservative reduction for better stationary operation
+            speed_threshold: Speed threshold to trigger ZUPT (m/s)
         """
         vx, vy = self.x[3:5]
         speed = np.sqrt(vx**2 + vy**2)
@@ -362,16 +356,15 @@ class RoboMasterEKF8DOF:
             H[0, 3] = 1.0  # ∂vx/∂vx
             H[1, 4] = 1.0  # ∂vy/∂vy
             
-            # Use standard ZUPT - no aggressive constraints
             self._kalman_update(z, h, H, self.R_zupt)
             logger.debug(f"ZUPT applied: speed={speed:.3f} m/s")
 
-    def update_zero_angular_rate(self, angular_rate_threshold: float = 0.03):  # More conservative: reduced from 0.05 to 0.03 rad/s
+    def update_zero_angular_rate(self, angular_rate_threshold: float = 0.05):
         """
         Zero-angular-rate update (ZARU): when angular rate is very low, measure omega=0.
         Directly tightens gyroscope bias estimate.
         Args:
-            angular_rate_threshold: Angular rate threshold to trigger ZARU (rad/s) - conservative reduction for better stationary operation
+            angular_rate_threshold: Angular rate threshold to trigger ZARU (rad/s)
         """
         # Current angular rate estimate (gyro measurement minus bias)
         omega_estimated = self.x[7]  # bias_angular_velocity
@@ -383,33 +376,8 @@ class RoboMasterEKF8DOF:
             H = np.zeros((1, self.n_states))
             H[0, 7] = 1.0  # ∂omega/∂bias_omega
             
-            # Use standard ZARU - no aggressive constraints
             self._kalman_update(z, h, H, self.R_zaru)
             logger.debug(f"ZARU applied: estimated_omega={omega_estimated:.4f} rad/s")
-    
-    def update_stationary_mode(self, accel_threshold: float = 0.05, gyro_threshold: float = 0.01):
-        """
-        Conservative stationary mode update: applies minimal constraints when device is clearly stationary.
-        This is a very conservative approach to avoid over-constraining the system.
-        Args:
-            accel_threshold: Accelerometer threshold to detect stationary mode (m/s²)
-            gyro_threshold: Gyroscope threshold to detect stationary mode (rad/s)
-        """
-        # Get current sensor measurements (these should be passed from the main loop)
-        # For now, we'll use the estimated biases as a proxy for sensor activity
-        bias_ax, bias_ay, bias_omega = self.x[5:8]
-        
-        # Check if we're in stationary mode based on bias stability
-        # If biases are stable and small, we're likely stationary
-        bias_magnitude = np.sqrt(bias_ax**2 + bias_ay**2)
-        
-        if bias_magnitude < accel_threshold and abs(bias_omega) < gyro_threshold:
-            # Only apply very conservative constraints - don't fight the EKF dynamics
-            # Just log that we're in stationary mode for debugging
-            logger.debug(f"Stationary mode detected: bias_mag={bias_magnitude:.4f}, gyro_bias={bias_omega:.4f}")
-            
-            # No aggressive constraints - let the EKF work naturally
-            # The reduced process noise should be sufficient
     
     def update_gps_position(self, gps_pos: np.ndarray):
         """
