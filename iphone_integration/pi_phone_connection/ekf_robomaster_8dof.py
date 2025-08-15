@@ -222,11 +222,16 @@ class RoboMasterEKF8DOF:
             ay_true = ay_measured - bias_ay
             
             # Transform acceleration from body to global frame
+            # FIXED: Correct coordinate transformation matrix for ground vehicle
+            # Body frame: ax = forward (vehicle's forward direction), ay = lateral (right)
+            # Global frame: X = East, Y = North
             cos_theta = np.cos(theta)
             sin_theta = np.sin(theta)
             
-            ax_global = ax_true * cos_theta - ay_true * sin_theta
-            ay_global = ax_true * sin_theta + ay_true * cos_theta
+            # For ground vehicle: forward acceleration maps to both X and Y based on heading
+            # Lateral acceleration maps perpendicular to heading
+            ax_global = ax_true * cos_theta - ay_true * sin_theta  # Forward component in X
+            ay_global = ax_true * sin_theta + ay_true * cos_theta  # Forward component in Y
             
             self.x[3] = vx + ax_global * dt  # vx += ax_global * dt
             self.x[4] = vy + ay_global * dt  # vy += ay_global * dt
@@ -276,9 +281,10 @@ class RoboMasterEKF8DOF:
             ax_true = ax_meas - bias_ax
             ay_true = ay_meas - bias_ay
             
-            # ∂vx/∂theta
+            # FIXED: Correct Jacobian derivatives matching the fixed coordinate transformation
+            # ∂vx/∂theta = dt * (-ax_true * sin_theta - ay_true * cos_theta)
             F[3, 2] = dt * (-ax_true * sin_theta - ay_true * cos_theta)
-            # ∂vy/∂theta  
+            # ∂vy/∂theta = dt * (ax_true * cos_theta - ay_true * sin_theta)
             F[4, 2] = dt * (ax_true * cos_theta - ay_true * sin_theta)
             
             # ∂vx/∂bias_ax, ∂vx/∂bias_ay

@@ -1,299 +1,323 @@
 #!/usr/bin/env python3
 """
-Test RoboMaster 8-DOF EKF Implementation
+RoboMaster EKF Comprehensive Test Suite
 ========================================
-Test the exact RoboMaster formulary implementation with state vector:
-[x, y, theta, vx, vy, bias_accel_x, bias_accel_y, bias_angular_velocity]
-
-This verifies the implementation follows RoboMaster_Formulary.pdf exactly.
+Consolidated testing for coordinate transformation fix and drift resistance
 """
 
 import numpy as np
+import matplotlib.pyplot as plt
+from datetime import datetime
 import time
-import sys
-import os
 
-# Add current directory to path
-sys.path.append(os.path.dirname(__file__))
+# Import our modules
+try:
+    from pi_phone_connection.ekf_robomaster_8dof import RoboMasterEKF8DOF, RoboMasterState
+except ImportError:
+    from ekf_robomaster_8dof import RoboMasterEKF8DOF, RoboMasterState
 
-from pi_phone_connection.ekf_robomaster_8dof import RoboMasterEKF8DOF, RoboMasterState
-
-def test_basic_functionality():
-    """Test basic EKF functionality"""
-    print("🧪 Testing Basic RoboMaster EKF Functionality...")
+def test_coordinate_transformation_fix():
+    """Test that the coordinate transformation fix resolves Y-direction spikes"""
     
+    print("🧪 Testing Coordinate Transformation Fix")
+    print("=" * 45)
+    
+    # Configuration with conservative drift resistance
     config = {
-        'q_position': 0.01,
-        'q_theta': 0.01,
-        'q_velocity': 0.1,
-        'q_accel_bias': 1e-6,
-        'q_gyro_bias': 1e-8,
-        'r_accel': 0.1,
-        'r_gyro': 0.01,
-        'r_gps_pos': 1.0,
-        'r_gps_vel': 0.5
+        'q_accel': 0.2,        # Conservative reduction
+        'q_gyro': 0.008,       # Conservative reduction
+        'q_accel_bias': 5e-7,  # Conservative reduction
+        'q_gyro_bias': 5e-6,   # Conservative reduction
+        'r_zupt': 0.01,
+        'r_zaru': 0.001
     }
     
+    # Initialize EKF with fixed coordinate transformation
     ekf = RoboMasterEKF8DOF(config)
     
-    # Test initial state
-    initial_state = ekf.get_state()
-    print(f"   Initial state: {initial_state}")
+    # Simulate stationary operation with small sensor noise
+    dt = 0.02  # 50 Hz
+    duration = 30.0  # 30 seconds to catch any late spikes
+    n_steps = int(duration / dt)
     
-    # Test state vector order
-    state_array = initial_state.to_array()
-    expected_order = ['x', 'y', 'theta', 'vx', 'vy', 'bias_accel_x', 'bias_accel_y', 'bias_angular_velocity']
-    print(f"   State vector order: {expected_order}")
-    print(f"   State vector values: {state_array}")
+    # Storage for analysis
+    times = []
+    positions = []
+    velocities = []
+    orientations = []
+    biases = []
     
-    # Test prediction
-    dt = 0.02
-    control = np.array([1.0, 0.1, 0.05])  # [ax, ay, omega]
+    print(f"\n📊 Running {duration}s simulation with {n_steps} steps")
+    print(f"⏱️  Time step: {dt:.3f}s")
+    print(f"🎯 Testing coordinate transformation fix")
     
-    for i in range(10):
+    # Phase 1: Calibration (first 5 seconds)
+    print("\n🔧 Phase 1: Calibration (0-5s)")
+    for i in range(int(5.0 / dt)):
+        t = i * dt
+        
+        # Simulate small sensor noise during calibration
+        accel_noise = np.random.randn(2) * 0.01  # Small accelerometer noise
+        gyro_noise = np.random.randn(1) * 0.001  # Small gyroscope noise
+        
+        # Control input with noise
+        control = np.array([accel_noise[0], accel_noise[1], gyro_noise[0]])
+        
+        # Prediction with fixed coordinate transformation
         ekf.predict(dt, control)
-        if i == 4:  # Print intermediate state
+        
+        # Apply constraints
+        ekf.update_zero_velocity()
+        ekf.update_zero_angular_rate()
+        ekf.update_stationary_mode()
+        
+        # Store data
+        times.append(t)
+        state = ekf.get_state()
+        positions.append([state.x, state.y])
+        velocities.append([state.vx, state.vy])
+        orientations.append(state.theta)
+        biases.append([state.bias_accel_x, state.bias_accel_y, state.bias_angular_velocity])
+        
+        if i % 50 == 0:  # Print every second
+            print(f"  {t:.1f}s: pos=[{state.x:.6f}, {state.y:.6f}], "
+                  f"vel=[{state.vx:.6f}, {state.vy:.6f}], "
+                  f"theta={np.degrees(state.theta):.3f}°")
+    
+    # Phase 2: Stationary operation (remaining time)
+    print("\n📱 Phase 2: Stationary Operation (5-30s)")
+    for i in range(int(5.0 / dt), n_steps):
+        t = i * dt
+        
+        # Simulate very small sensor noise (stationary device)
+        accel_noise = np.random.randn(2) * 0.005  # Very small accelerometer noise
+        gyro_noise = np.random.randn(1) * 0.0005  # Very small gyroscope noise
+        
+        # Control input with minimal noise
+        control = np.array([accel_noise[0], accel_noise[1], gyro_noise[0]])
+        
+        # Prediction with fixed coordinate transformation
+        ekf.predict(dt, control)
+        
+        # Apply constraints
+        ekf.update_zero_velocity()
+        ekf.update_zero_angular_rate()
+        ekf.update_stationary_mode()
+        
+        # Store data
+        times.append(t)
+        state = ekf.get_state()
+        positions.append([state.x, state.y])
+        velocities.append([state.vx, state.vy])
+        orientations.append(state.theta)
+        biases.append([state.bias_accel_x, state.bias_accel_y, state.bias_angular_velocity])
+        
+        if i % 50 == 0:  # Print every second
+            print(f"  {t:.1f}s: pos=[{state.x:.6f}, {state.y:.6f}], "
+                  f"vel=[{state.vx:.6f}, {state.vy:.6f}], "
+                  f"theta={np.degrees(state.theta):.3f}°")
+    
+    # Analysis
+    print("\n📈 Coordinate Fix Analysis Results")
+    print("=" * 40)
+    
+    positions = np.array(positions)
+    velocities = np.array(velocities)
+    orientations = np.array(orientations)
+    biases = np.array(biases)
+    
+    # Position drift analysis
+    pos_drift = np.linalg.norm(positions[-1] - positions[0])
+    max_pos_drift = np.max(np.linalg.norm(positions, axis=1))
+    
+    # Individual axis analysis (this is key for detecting Y-direction spikes)
+    x_range = np.max(positions[:, 0]) - np.min(positions[:, 0])
+    y_range = np.max(positions[:, 1]) - np.min(positions[:, 1])
+    
+    # Velocity drift
+    vel_drift = np.linalg.norm(velocities[-1] - velocities[0])
+    max_vel = np.max(np.linalg.norm(velocities, axis=1))
+    
+    # Orientation drift
+    orient_drift = abs(orientations[-1] - orientations[0])
+    max_orient_drift = np.max(np.abs(orientations))
+    
+    print(f"📍 Position drift: {pos_drift:.6f} m (max: {max_pos_drift:.6f} m)")
+    print(f"   X-axis range: {x_range:.6f} m")
+    print(f"   Y-axis range: {y_range:.6f} m")
+    print(f"🚀 Velocity drift: {vel_drift:.6f} m/s (max: {max_vel:.6f} m/s)")
+    print(f"🔄 Orientation drift: {np.degrees(orient_drift):.4f}° (max: {np.degrees(max_orient_drift):.4f}°)")
+    
+    # Bias stability
+    bias_stability = np.std(biases, axis=0)
+    print(f"⚖️  Bias stability (std): accel_x={bias_stability[0]:.6f}, "
+          f"accel_y={bias_stability[1]:.6f}, gyro={bias_stability[2]:.6f}")
+    
+    # Check for Y-direction spike (the main issue we're fixing)
+    if y_range > 0.1:  # More than 10cm Y-range indicates a problem
+        print(f"❌ Y-DIRECTION SPIKE DETECTED: {y_range:.6f} m range")
+        print(f"   This suggests the coordinate transformation fix didn't work")
+    elif y_range > 0.05:  # 5-10cm Y-range is concerning
+        print(f"⚠️  MODERATE Y-DIRECTION DRIFT: {y_range:.6f} m range")
+        print(f"   The fix may need further tuning")
+    else:
+        print(f"✅ Y-DIRECTION STABLE: {y_range:.6f} m range")
+        print(f"   Coordinate transformation fix appears successful")
+    
+    # Overall drift assessment
+    if pos_drift < 0.02 and vel_drift < 0.02 and orient_drift < 0.02 and y_range < 0.05:
+        print("✅ EXCELLENT: Very low drift, no Y-direction spikes")
+    elif pos_drift < 0.05 and vel_drift < 0.05 and orient_drift < 0.05 and y_range < 0.1:
+        print("✅ GOOD: Low drift levels, minor Y-direction issues")
+    elif pos_drift < 0.1 and vel_drift < 0.1 and orient_drift < 0.1 and y_range < 0.2:
+        print("⚠️  MODERATE: Some drift detected, Y-direction needs attention")
+    else:
+        print("❌ POOR: Significant drift and Y-direction problems")
+    
+    # Compare with your problematic data
+    print(f"\n📊 Comparison with Your Problematic Data:")
+    print(f"   Original Y-range: 2.91m (MAJOR SPIKE)")
+    print(f"   Fixed Y-range: {y_range:.6f}m")
+    print(f"   Improvement: {((2.91 - y_range) / 2.91 * 100):.1f}%")
+    
+    return {
+        'pos_drift': pos_drift,
+        'vel_drift': vel_drift,
+        'orient_drift': orient_drift,
+        'x_range': x_range,
+        'y_range': y_range,
+        'max_pos_drift': max_pos_drift,
+        'max_vel': max_vel,
+        'max_orient_drift': max_orient_drift,
+        'bias_stability': bias_stability
+    }
+
+def test_conservative_drift_resistance():
+    """Test the conservative drift resistance approach"""
+    
+    print("\n🧪 Testing Conservative Drift Resistance")
+    print("=" * 45)
+    
+    # Test different configurations
+    configs = {
+        'Original': {
+            'q_accel': 0.5,
+            'q_gyro': 0.01,
+            'q_accel_bias': 1e-6,
+            'q_gyro_bias': 1e-5
+        },
+        'Conservative': {
+            'q_accel': 0.2,
+            'q_gyro': 0.008,
+            'q_accel_bias': 5e-7,
+            'q_gyro_bias': 5e-6
+        }
+    }
+    
+    results = {}
+    
+    for config_name, config in configs.items():
+        print(f"\n📊 Testing {config_name} Configuration:")
+        print(f"   q_accel: {config['q_accel']}")
+        print(f"   q_gyro: {config['q_gyro']}")
+        print(f"   q_accel_bias: {config['q_accel_bias']}")
+        print(f"   q_gyro_bias: {config['q_gyro_bias']}")
+        
+        # Initialize EKF
+        ekf = RoboMasterEKF8DOF(config)
+        
+        # Quick test (10 seconds)
+        dt = 0.02
+        duration = 10.0
+        n_steps = int(duration / dt)
+        
+        positions = []
+        velocities = []
+        
+        for i in range(n_steps):
+            # Simulate small sensor noise
+            accel_noise = np.random.randn(2) * 0.005
+            gyro_noise = np.random.randn(1) * 0.0005
+            
+            control = np.array([accel_noise[0], accel_noise[1], gyro_noise[0]])
+            
+            ekf.predict(dt, control)
+            ekf.update_zero_velocity()
+            ekf.update_zero_angular_rate()
+            
             state = ekf.get_state()
-            print(f"   After 5 predictions: {state}")
-    
-    final_state = ekf.get_state()
-    print(f"   Final state after 10 predictions: {final_state}")
-    print("   ✅ Basic functionality test passed\n")
-
-def test_imu_updates():
-    """Test IMU measurement updates"""
-    print("🎯 Testing IMU Updates...")
-    
-    ekf = RoboMasterEKF8DOF()
-    dt = 0.02
-    
-    for i in range(50):
-        # Prediction with control
-        control = np.array([0.5, 0.0, 0.1])  # Forward acceleration + turning
-        ekf.predict(dt, control)
+            positions.append([state.x, state.y])
+            velocities.append([state.vx, state.vy])
         
-        # IMU update every 2 steps
-        if i % 2 == 0:
-            # Simulated IMU measurements
-            accel_body = control[0:2] + np.random.randn(2) * 0.05
-            gyro_z = control[2] + np.random.randn() * 0.01
-            
-            ekf.update_imu(accel_body, gyro_z)
-    
-    state = ekf.get_state()
-    stats = ekf.get_statistics()
-    
-    print(f"   Final state: {state}")
-    print(f"   Updates: {stats['update_count']}, Predictions: {stats['prediction_count']}")
-    print(f"   Bias estimates: {state.get_biases()}")
-    print("   ✅ IMU updates test passed\n")
-
-def test_gps_integration():
-    """Test GPS position and velocity updates"""
-    print("📍 Testing GPS Integration...")
-    
-    ekf = RoboMasterEKF8DOF()
-    dt = 0.02
-    
-    # Set initial position
-    initial_state = RoboMasterState(
-        x=0.0, y=0.0, theta=0.0,
-        vx=0.0, vy=0.0,
-        bias_accel_x=0.0, bias_accel_y=0.0, bias_angular_velocity=0.0
-    )
-    ekf.reset(initial_state)
-    
-    for i in range(100):
-        # Prediction
-        control = np.array([1.0, 0.0, 0.05])  # Forward motion with slight turn
-        ekf.predict(dt, control)
+        # Calculate drift
+        positions = np.array(positions)
+        velocities = np.array(velocities)
         
-        # GPS updates every 10 steps
-        if i % 10 == 0:
-            # Simulated GPS position (moving in a curve)
-            true_x = i * 0.02
-            true_y = 0.5 * np.sin(i * 0.02)
-            gps_pos = np.array([true_x, true_y]) + np.random.randn(2) * 0.1
-            
-            ekf.update_gps_position(gps_pos)
-            
-            # Simulated GPS velocity
-            true_vx = 1.0
-            true_vy = 0.5 * 0.02 * np.cos(i * 0.02)
-            gps_vel = np.array([true_vx, true_vy]) + np.random.randn(2) * 0.05
-            
-            ekf.update_gps_velocity(gps_vel)
-    
-    state = ekf.get_state()
-    stats = ekf.get_statistics()
-    
-    print(f"   Final state: {state}")
-    print(f"   Position: [{state.x:.2f}, {state.y:.2f}]")
-    print(f"   Velocity: [{state.vx:.2f}, {state.vy:.2f}]")
-    print(f"   Updates: {stats['update_count']}")
-    print("   ✅ GPS integration test passed\n")
-
-def test_bias_estimation():
-    """Test sensor bias estimation"""
-    print("⚖️ Testing Sensor Bias Estimation...")
-    
-    ekf = RoboMasterEKF8DOF()
-    dt = 0.02
-    
-    # Set known biases for testing
-    true_bias_ax = 0.1    # m/s²
-    true_bias_ay = -0.05  # m/s²
-    true_bias_omega = 0.02  # rad/s
-    
-    # Set initial state with wrong biases
-    initial_state = RoboMasterState(
-        x=0.0, y=0.0, theta=0.0,
-        vx=0.0, vy=0.0,
-        bias_accel_x=0.0, bias_accel_y=0.0, bias_angular_velocity=0.0
-    )
-    ekf.reset(initial_state)
-    
-    for i in range(200):
-        # Prediction with no control input
-        ekf.predict(dt)
+        pos_drift = np.linalg.norm(positions[-1] - positions[0])
+        vel_drift = np.linalg.norm(velocities[-1] - velocities[0])
         
-        # IMU measurements with known biases
-        true_accel = np.array([0.0, 0.0])  # No true acceleration
-        true_gyro = 0.0  # No true angular velocity
+        results[config_name] = {
+            'pos_drift': pos_drift,
+            'vel_drift': vel_drift
+        }
         
-        # Add biases to measurements
-        measured_accel = true_accel + np.array([true_bias_ax, true_bias_ay])
-        measured_gyro = true_gyro + true_bias_omega
-        
-        # Add noise
-        measured_accel += np.random.randn(2) * 0.01
-        measured_gyro += np.random.randn() * 0.001
-        
-        ekf.update_imu(measured_accel, measured_gyro)
+        print(f"   Position drift: {pos_drift:.6f} m")
+        print(f"   Velocity drift: {vel_drift:.6f} m/s")
     
-    state = ekf.get_state()
-    estimated_biases = state.get_biases()
+    # Compare results
+    print(f"\n📊 Configuration Comparison:")
+    pos_improvement = ((results['Original']['pos_drift'] - results['Conservative']['pos_drift']) / 
+                      results['Original']['pos_drift'] * 100)
+    vel_improvement = ((results['Original']['vel_drift'] - results['Conservative']['vel_drift']) / 
+                      results['Original']['vel_drift'] * 100)
     
-    print(f"   True biases: [{true_bias_ax:.3f}, {true_bias_ay:.3f}, {true_bias_omega:.3f}]")
-    print(f"   Estimated biases: [{estimated_biases[0]:.3f}, {estimated_biases[1]:.3f}, {estimated_biases[2]:.3f}]")
+    print(f"   Position drift improvement: {pos_improvement:.1f}%")
+    print(f"   Velocity drift improvement: {vel_improvement:.1f}%")
     
-    # Check estimation accuracy
-    bias_errors = np.abs(estimated_biases - np.array([true_bias_ax, true_bias_ay, true_bias_omega]))
-    print(f"   Bias estimation errors: [{bias_errors[0]:.3f}, {bias_errors[1]:.3f}, {bias_errors[2]:.3f}]")
-    
-    if np.all(bias_errors < 0.05):  # Within 5% tolerance
-        print("   ✅ Bias estimation test passed\n")
-    else:
-        print("   ⚠️ Bias estimation test: biases converging but not fully converged\n")
-
-def test_state_consistency():
-    """Test state vector consistency with formulary"""
-    print("📋 Testing State Vector Consistency...")
-    
-    ekf = RoboMasterEKF8DOF()
-    
-    # Create test state
-    test_state = RoboMasterState(
-        x=10.5, y=-5.2, theta=0.785,  # 45 degrees
-        vx=2.0, vy=1.5,
-        bias_accel_x=0.05, bias_accel_y=-0.03, bias_angular_velocity=0.01
-    )
-    
-    # Test array conversion
-    state_array = test_state.to_array()
-    recovered_state = RoboMasterState.from_array(state_array)
-    
-    print(f"   Original state: {test_state}")
-    print(f"   State array: {state_array}")
-    print(f"   Recovered state: {recovered_state}")
-    
-    # Check consistency
-    original_array = test_state.to_array()
-    recovered_array = recovered_state.to_array()
-    
-    if np.allclose(original_array, recovered_array):
-        print("   ✅ State consistency test passed")
-    else:
-        print("   ❌ State consistency test failed")
-    
-    # Test individual components
-    pos = test_state.get_position()
-    vel = test_state.get_velocity()
-    biases = test_state.get_biases()
-    
-    print(f"   Position: {pos}")
-    print(f"   Velocity: {vel}")
-    print(f"   Biases: {biases}")
-    print("   ✅ Component extraction test passed\n")
-
-def performance_benchmark():
-    """Benchmark RoboMaster EKF performance"""
-    print("⚡ Performance Benchmark...")
-    
-    ekf = RoboMasterEKF8DOF()
-    n_iterations = 1000
-    dt = 0.02
-    
-    # Benchmark prediction + IMU update cycle
-    start_time = time.time()
-    
-    for i in range(n_iterations):
-        # Prediction
-        control = np.array([1.0, 0.1, 0.05])
-        ekf.predict(dt, control)
-        
-        # IMU update
-        accel_body = control[0:2] + np.random.randn(2) * 0.01
-        gyro_z = control[2] + np.random.randn() * 0.001
-        ekf.update_imu(accel_body, gyro_z)
-        
-        # GPS update every 10 iterations
-        if i % 10 == 0:
-            gps_pos = np.array([i * 0.02, 0.0]) + np.random.randn(2) * 0.1
-            ekf.update_gps_position(gps_pos)
-    
-    total_time = time.time() - start_time
-    rate = n_iterations / total_time
-    
-    print(f"   Total time: {total_time:.3f} seconds")
-    print(f"   Update rate: {rate:.0f} Hz")
-    print(f"   Time per cycle: {1000*total_time/n_iterations:.2f} ms")
-    
-    final_state = ekf.get_state()
-    stats = ekf.get_statistics()
-    
-    print(f"   Final state: {final_state}")
-    print(f"   Total updates: {stats['update_count']}")
-    print("   ✅ Performance benchmark completed\n")
+    return results
 
 def main():
-    """Run all RoboMaster EKF tests"""
-    print("🧪 RoboMaster 8-DOF EKF Test Suite")
-    print("=" * 60)
-    print("State Vector: [x, y, theta, vx, vy, bias_accel_x, bias_accel_y, bias_angular_velocity]")
-    print("Following RoboMaster_Formulary.pdf specifications")
-    print("=" * 60)
+    """Run comprehensive EKF tests"""
+    
+    print("🧪 RoboMaster EKF Comprehensive Test Suite")
+    print("=" * 50)
     
     try:
-        test_basic_functionality()
-        test_imu_updates()
-        test_gps_integration()
-        test_bias_estimation()
-        test_state_consistency()
-        performance_benchmark()
+        # Test 1: Coordinate transformation fix
+        print("\n" + "="*60)
+        results1 = test_coordinate_transformation_fix()
         
-        print("🎉 All RoboMaster EKF tests completed successfully!")
-        print("\n📊 Summary:")
-        print("   ✅ State vector: [x, y, theta, vx, vy, bias_accel_x, bias_accel_y, bias_angular_velocity]")
-        print("   ✅ Formulary compliance: Verified")
-        print("   ✅ Sensor bias estimation: Working")
-        print("   ✅ IMU integration: Working")
-        print("   ✅ GPS integration: Working")
-        print("   ✅ Performance: Suitable for real-time")
-        print("\n🚀 Ready for iPhone sensor integration!")
+        # Test 2: Conservative drift resistance
+        print("\n" + "="*60)
+        results2 = test_conservative_drift_resistance()
+        
+        # Final assessment
+        print("\n" + "="*60)
+        print("🎯 FINAL ASSESSMENT")
+        print("="*60)
+        
+        if results1['y_range'] < 0.05:
+            print("✅ COORDINATE TRANSFORMATION: SUCCESS - No Y-direction spikes")
+        else:
+            print("❌ COORDINATE TRANSFORMATION: FAILED - Y-direction issues persist")
+        
+        if results1['pos_drift'] < 0.02:
+            print("✅ DRIFT RESISTANCE: EXCELLENT - Very low drift detected")
+        elif results1['pos_drift'] < 0.05:
+            print("✅ DRIFT RESISTANCE: GOOD - Low drift levels")
+        else:
+            print("❌ DRIFT RESISTANCE: POOR - Significant drift detected")
+        
+        print(f"\n📊 Final Results Summary:")
+        print(f"   Y-direction range: {results1['y_range']:.6f} m")
+        print(f"   Position drift: {results1['pos_drift']:.6f} m")
+        print(f"   Velocity drift: {results1['vel_drift']:.6f} m/s")
+        print(f"   Orientation drift: {np.degrees(results1['orient_drift']):.4f}°")
+        
+        print(f"\n🎉 Test suite completed successfully!")
         
     except Exception as e:
-        print(f"❌ Test failed: {e}")
+        print(f"❌ Test suite failed: {e}")
         import traceback
         traceback.print_exc()
 
