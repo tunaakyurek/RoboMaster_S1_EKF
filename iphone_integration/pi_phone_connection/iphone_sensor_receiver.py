@@ -57,6 +57,8 @@ class iPhoneSensorData:
     gps_lon: Optional[float] = None    # degrees
     gps_alt: Optional[float] = None    # meters
     gps_accuracy: Optional[float] = None  # meters
+    gps_speed: Optional[float] = None     # m/s
+    gps_course: Optional[float] = None    # degrees (0-360, 0=N)
     
     # Barometer (altitude)
     pressure: Optional[float] = None    # Pa
@@ -420,11 +422,20 @@ class iPhoneDataReceiver:
         lon = get_num(json_data, 'locationLongitude', None)
         alt = get_num(json_data, 'locationAltitude', None)
         acc = get_num(json_data, 'locationHorizontalAccuracy', None)
+        spd = get_num(json_data, 'locationSpeed', None)
+        crs = get_num(json_data, 'locationCourse', None)
         if lat is None:
             lat = get_num(json_data, 'gps_lat', None)
             lon = get_num(json_data, 'gps_lon', None)
             alt = get_num(json_data, 'gps_alt', alt)
             acc = get_num(json_data, 'gps_accuracy', acc)
+            spd = get_num(json_data, 'gps_speed', spd)
+            crs = get_num(json_data, 'gps_course', crs)
+        # Generic fallbacks
+        if spd is None:
+            spd = get_num(json_data, 'speed', None)
+        if crs is None:
+            crs = get_num(json_data, 'course', None)
 
         # Barometer
         pressure = get_num(json_data, 'altimeterPressure', None)
@@ -473,6 +484,8 @@ class iPhoneDataReceiver:
             gps_lon=lon,
             gps_alt=alt,
             gps_accuracy=acc,
+            gps_speed=spd,
+            gps_course=crs,
             pressure=pressure,
             altitude=altitude_baro,
             roll=roll,

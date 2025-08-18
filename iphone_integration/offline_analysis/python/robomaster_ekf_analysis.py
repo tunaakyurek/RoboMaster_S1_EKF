@@ -29,6 +29,18 @@ def load_robomaster_data(csv_file):
         'gyro_x', 'gyro_y', 'gyro_z', 'cov_trace'
     ]
     
+    # Optional raw sensor columns that may appear in newer logs
+    optional_cols = [
+        # GPS in local ENU (preferred if present)
+        'gps_x', 'gps_y', 'gps_vx', 'gps_vy', 'gps_speed',
+        # GPS in geodetic
+        'lat', 'lon', 'altitude',
+        # Magnetometer
+        'mag_x', 'mag_y', 'mag_z',
+        # Barometer / altitude
+        'baro'
+    ]
+    
     try:
         df = pd.read_csv(csv_file)
         print(f"✅ Loaded {len(df)} samples")
@@ -44,6 +56,22 @@ def load_robomaster_data(csv_file):
         
         # Convert theta from radians to degrees for plotting
         df['theta_deg'] = np.degrees(df['theta'])
+
+        # If GPS velocity components exist, compute speed if missing
+        if {'gps_vx', 'gps_vy'}.issubset(df.columns) and 'gps_speed' not in df.columns:
+            df['gps_speed'] = np.sqrt(df['gps_vx']**2 + df['gps_vy']**2)
+
+        # If geodetic GPS (lat/lon) exists but local 'gps_x','gps_y' don't, create approximate local meters
+        if {'lat', 'lon'}.issubset(df.columns) and not {'gps_x', 'gps_y'}.issubset(df.columns):
+            try:
+                lat0 = float(df['lat'].iloc[0])
+                lon0 = float(df['lon'].iloc[0])
+                lat_to_m = 111320.0
+                lon_to_m = 111320.0 * np.cos(np.radians(lat0))
+                df['gps_x'] = (df['lat'] - lat0) * lat_to_m
+                df['gps_y'] = (df['lon'] - lon0) * lon_to_m
+            except Exception:
+                pass
         
         print(f"⏱️ Data duration: {df['time_rel'].iloc[-1]:.1f} seconds")
         print(f"📈 Sampling rate: {len(df) / df['time_rel'].iloc[-1]:.1f} Hz")
@@ -127,6 +155,9 @@ def plot_robomaster_analysis(df, output_dir):
     plt.plot(df['x'], df['y'], 'b-', linewidth=2, alpha=0.7)
     plt.plot(df['x'].iloc[0], df['y'].iloc[0], 'go', markersize=10, label='Start')
     plt.plot(df['x'].iloc[-1], df['y'].iloc[-1], 'ro', markersize=10, label='End')
+    # Overlay raw GPS trajectory if available (either local gps_x/gps_y or derived from lat/lon)
+    if {'gps_x', 'gps_y'}.issubset(df.columns):
+        plt.scatter(df['gps_x'], df['gps_y'], s=8, c='k', alpha=0.4, label='GPS')
     plt.xlabel('X Position (m)')
     plt.ylabel('Y Position (m)')
     plt.title('RoboMaster 2D Trajectory')
@@ -138,6 +169,10 @@ def plot_robomaster_analysis(df, output_dir):
     ax2 = plt.subplot(3, 3, 2)
     plt.plot(df['time_rel'], df['x'], 'r-', label='X', linewidth=2)
     plt.plot(df['time_rel'], df['y'], 'g-', label='Y', linewidth=2)
+    # Overlay GPS position if available
+    if {'gps_x', 'gps_y'}.issubset(df.columns):
+        plt.plot(df['time_rel'], df['gps_x'], 'r:', label='GPS X', linewidth=1.5, alpha=0.8)
+        plt.plot(df['time_rel'], df['gps_y'], 'g:', label='GPS Y', linewidth=1.5, alpha=0.8)
     plt.xlabel('Time (s)')
     plt.ylabel('Position (m)')
     plt.title('Position vs Time')
@@ -158,6 +193,12 @@ def plot_robomaster_analysis(df, output_dir):
     plt.plot(df['time_rel'], df['vy'], 'g-', label='vy', linewidth=2)
     speed = np.sqrt(df['vx']**2 + df['vy']**2)
     plt.plot(df['time_rel'], speed, 'b--', label='speed', linewidth=2)
+    # Overlay GPS velocity if available
+    if {'gps_vx', 'gps_vy'}.issubset(df.columns):
+        plt.plot(df['time_rel'], df['gps_vx'], 'r-.', label='GPS vx', linewidth=1.5, alpha=0.9)
+        plt.plot(df['time_rel'], df['gps_vy'], 'g-.', label='GPS vy', linewidth=1.5, alpha=0.9)
+        if 'gps_speed' in df.columns:
+            plt.plot(df['time_rel'], df['gps_speed'], 'b:', label='GPS speed', linewidth=1.5, alpha=0.9)
     plt.xlabel('Time (s)')
     plt.ylabel('Velocity (m/s)')
     plt.title('Velocity vs Time')
@@ -198,15 +239,34 @@ def plot_robomaster_analysis(df, output_dir):
     plt.plot(df['time_rel'], df['gyro_x'], 'r-', alpha=0.7, label='ωx')
     plt.plot(df['time_rel'], df['gyro_y'], 'g-', alpha=0.7, label='ωy')
     plt.plot(df['time_rel'], df['gyro_z'], 'b-', alpha=0.7, label='ωz')
+    # If magnetometer data exists, overlay with a secondary axis for clarity
+    if {'mag_x', 'mag_y', 'mag_z'}.issubset(df.columns):
+        ax8b = ax8.twinx()
+        ax8b.plot(df['time_rel'], df['mag_x'], color='tab:orange', alpha=0.4, label='mx')
+        ax8b.plot(df['time_rel'], df['mag_y'], color='tab:purple', alpha=0.4, label='my')
+        ax8b.plot(df['time_rel'], df['mag_z'], color='tab:brown', alpha=0.4, label='mz')
+        ax8b.set_ylabel('Magnetic Field (a.u.)')
+        # Build a combined legend
+        lines1, labels1 = ax8.get_legend_handles_labels()
+        lines2, labels2 = ax8b.get_legend_handles_labels()
+        ax8.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
     plt.xlabel('Time (s)')
     plt.ylabel('Angular Velocity (rad/s)')
     plt.title('Raw Gyroscope Data')
     plt.grid(True, alpha=0.3)
-    plt.legend()
+    if not {'mag_x', 'mag_y', 'mag_z'}.issubset(df.columns):
+        plt.legend()
     
-    # 9. Covariance Trace
+    # 9. Covariance Trace (overlay barometer altitude if available)
     ax9 = plt.subplot(3, 3, 9)
     plt.semilogy(df['time_rel'], df['cov_trace'], 'k-', linewidth=2)
+    if 'baro' in df.columns:
+        ax9b = ax9.twinx()
+        ax9b.plot(df['time_rel'], df['baro'], 'c-', alpha=0.5, label='Baro Alt')
+        ax9b.set_ylabel('Altitude (baro, a.u.)')
+        lines1, labels1 = ax9.get_legend_handles_labels()
+        lines2, labels2 = ax9b.get_legend_handles_labels()
+        ax9.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
     plt.xlabel('Time (s)')
     plt.ylabel('Covariance Trace')
     plt.title('EKF Uncertainty (Log Scale)')
@@ -220,6 +280,125 @@ def plot_robomaster_analysis(df, output_dir):
     plt.savefig(plot_file, dpi=300, bbox_inches='tight')
     print(f"📈 Plots saved to: {plot_file}")
     
+    plt.show()
+
+def plot_raw_sensor_overview(df, output_dir):
+    """Create a dedicated figure for raw sensor data (GPS/IMU/Mag/Baro)"""
+    print("\n📊 Creating Raw Sensor overview plots...")
+
+    fig = plt.figure(figsize=(16, 12))
+
+    # 1. GPS 2D trajectory (if available)
+    ax1 = plt.subplot(3, 3, 1)
+    if {'gps_x', 'gps_y'}.issubset(df.columns):
+        plt.plot(df['gps_x'], df['gps_y'], 'k.', markersize=2, alpha=0.6, label='GPS')
+        plt.plot(df['gps_x'].iloc[0], df['gps_y'].iloc[0], 'go', label='Start')
+        plt.plot(df['gps_x'].iloc[-1], df['gps_y'].iloc[-1], 'ro', label='End')
+        plt.axis('equal')
+        plt.legend()
+    else:
+        plt.text(0.5, 0.5, 'No GPS (gps_x/gps_y)', ha='center', va='center', transform=ax1.transAxes)
+    plt.xlabel('GPS X (m)')
+    plt.ylabel('GPS Y (m)')
+    plt.title('Raw GPS 2D Trajectory')
+    plt.grid(True, alpha=0.3)
+
+    # 2. GPS position vs time
+    ax2 = plt.subplot(3, 3, 2)
+    if {'gps_x', 'gps_y'}.issubset(df.columns):
+        plt.plot(df['time_rel'], df['gps_x'], 'r:', label='GPS X')
+        plt.plot(df['time_rel'], df['gps_y'], 'g:', label='GPS Y')
+        plt.legend()
+    else:
+        plt.text(0.5, 0.5, 'No GPS position columns', ha='center', va='center', transform=ax2.transAxes)
+    plt.xlabel('Time (s)')
+    plt.ylabel('Position (m)')
+    plt.title('GPS Position vs Time')
+    plt.grid(True, alpha=0.3)
+
+    # 3. GPS velocity/speed vs time
+    ax3 = plt.subplot(3, 3, 3)
+    any_gps_vel = False
+    if {'gps_vx', 'gps_vy'}.issubset(df.columns):
+        plt.plot(df['time_rel'], df['gps_vx'], 'r-.', label='GPS vx')
+        plt.plot(df['time_rel'], df['gps_vy'], 'g-.', label='GPS vy')
+        any_gps_vel = True
+    if 'gps_speed' in df.columns:
+        plt.plot(df['time_rel'], df['gps_speed'], 'b:', label='GPS speed')
+        any_gps_vel = True
+    if not any_gps_vel:
+        plt.text(0.5, 0.5, 'No GPS velocity/speed', ha='center', va='center', transform=ax3.transAxes)
+    else:
+        plt.legend()
+    plt.xlabel('Time (s)')
+    plt.ylabel('Velocity (m/s)')
+    plt.title('GPS Velocity/Speed vs Time')
+    plt.grid(True, alpha=0.3)
+
+    # 4. Accelerometer
+    ax4 = plt.subplot(3, 3, 4)
+    if {'accel_x', 'accel_y', 'accel_z'}.issubset(df.columns):
+        plt.plot(df['time_rel'], df['accel_x'], 'r-', alpha=0.7, label='ax')
+        plt.plot(df['time_rel'], df['accel_y'], 'g-', alpha=0.7, label='ay')
+        plt.plot(df['time_rel'], df['accel_z'], 'b-', alpha=0.7, label='az')
+        plt.legend()
+    else:
+        plt.text(0.5, 0.5, 'No accelerometer data', ha='center', va='center', transform=ax4.transAxes)
+    plt.xlabel('Time (s)')
+    plt.ylabel('Acceleration (m/s²)')
+    plt.title('Raw Accelerometer Data')
+    plt.grid(True, alpha=0.3)
+
+    # 5. Gyroscope
+    ax5 = plt.subplot(3, 3, 5)
+    if {'gyro_x', 'gyro_y', 'gyro_z'}.issubset(df.columns):
+        plt.plot(df['time_rel'], df['gyro_x'], 'r-', alpha=0.7, label='ωx')
+        plt.plot(df['time_rel'], df['gyro_y'], 'g-', alpha=0.7, label='ωy')
+        plt.plot(df['time_rel'], df['gyro_z'], 'b-', alpha=0.7, label='ωz')
+        plt.legend()
+    else:
+        plt.text(0.5, 0.5, 'No gyroscope data', ha='center', va='center', transform=ax5.transAxes)
+    plt.xlabel('Time (s)')
+    plt.ylabel('Angular Velocity (rad/s)')
+    plt.title('Raw Gyroscope Data')
+    plt.grid(True, alpha=0.3)
+
+    # 6. Magnetometer
+    ax6 = plt.subplot(3, 3, 6)
+    if {'mag_x', 'mag_y', 'mag_z'}.issubset(df.columns):
+        plt.plot(df['time_rel'], df['mag_x'], color='tab:orange', alpha=0.8, label='mx')
+        plt.plot(df['time_rel'], df['mag_y'], color='tab:purple', alpha=0.8, label='my')
+        plt.plot(df['time_rel'], df['mag_z'], color='tab:brown', alpha=0.8, label='mz')
+        plt.legend()
+    else:
+        plt.text(0.5, 0.5, 'No magnetometer data', ha='center', va='center', transform=ax6.transAxes)
+    plt.xlabel('Time (s)')
+    plt.ylabel('Magnetic Field (a.u.)')
+    plt.title('Raw Magnetometer Data')
+    plt.grid(True, alpha=0.3)
+
+    # 7. Barometer / altitude
+    ax7 = plt.subplot(3, 3, 7)
+    if 'baro' in df.columns:
+        plt.plot(df['time_rel'], df['baro'], 'c-', alpha=0.9, label='baro')
+        plt.legend()
+    elif 'altitude' in df.columns:
+        plt.plot(df['time_rel'], df['altitude'], 'c-', alpha=0.9, label='altitude')
+        plt.legend()
+    else:
+        plt.text(0.5, 0.5, 'No barometer/altitude data', ha='center', va='center', transform=ax7.transAxes)
+    plt.xlabel('Time (s)')
+    plt.ylabel('Altitude (a.u.)')
+    plt.title('Barometer / Altitude')
+    plt.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    plot_file = os.path.join(output_dir, f'robomaster_raw_sensors_{timestamp}.png')
+    plt.savefig(plot_file, dpi=300, bbox_inches='tight')
+    print(f"📈 Raw sensor plots saved to: {plot_file}")
+
     plt.show()
 
 def generate_report(df, pos_stats, vel_stats, theta_stats, bias_stats, output_dir):
@@ -259,6 +438,7 @@ def main():
     parser = argparse.ArgumentParser(description='Analyze RoboMaster EKF log files')
     parser.add_argument('--file', required=True, help='Path to RoboMaster EKF CSV log file')
     parser.add_argument('--output', default='analysis_results', help='Output directory for plots and reports')
+    parser.add_argument('--raw-file', default=None, help='Optional path to raw sensor CSV file (robomaster_raw_log_*.csv)')
     
     args = parser.parse_args()
     
@@ -275,6 +455,25 @@ def main():
     
     # Create plots
     plot_robomaster_analysis(df, args.output)
+    # Create dedicated raw sensor figure
+    if args.raw_file and os.path.exists(args.raw_file):
+        try:
+            df_raw = pd.read_csv(args.raw_file)
+            # Build time_rel if possible
+            if 'timestamp' in df_raw.columns and len(df_raw) > 0:
+                df_raw['time_rel'] = df_raw['timestamp'] - df_raw['timestamp'].iloc[0]
+            # Map geodetic to local if EKF file had reference
+            if {'lat','lon'}.issubset(df_raw.columns) and not {'gps_x','gps_y'}.issubset(df_raw.columns):
+                # try to derive using EKF file's origin if available
+                if {'gps_x','gps_y'}.issubset(df.columns):
+                    # Already in local in EKF; skip
+                    pass
+            plot_raw_sensor_overview(df_raw, args.output)
+        except Exception as e:
+            print(f"⚠️ Failed to read raw file: {e}. Falling back to EKF CSV for raw plots.")
+            plot_raw_sensor_overview(df, args.output)
+    else:
+        plot_raw_sensor_overview(df, args.output)
     
     # Generate report
     generate_report(df, pos_stats, vel_stats, theta_stats, bias_stats, args.output)

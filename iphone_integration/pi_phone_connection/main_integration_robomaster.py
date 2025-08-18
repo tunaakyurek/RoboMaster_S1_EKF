@@ -83,6 +83,9 @@ class RoboMasterEKFIntegration:
         self.log_dir = self.config.get('log_dir', './data')
         self.log_file = None
         self.log_writer = None
+        # Raw sensor logging (independent from EKF)
+        self.raw_log_file = None
+        self.raw_log_writer = None
         
         # State publishing
         self.state_queue = queue.Queue(maxsize=100)
@@ -258,6 +261,7 @@ class RoboMasterEKFIntegration:
         # Create log file
         if self.config.get('logging', {}).get('enabled', True):
             self._create_log_file()
+            self._create_raw_log_file()
         
         # Start receiver
         self.receiver.start(callback=self._sensor_data_callback)
@@ -291,6 +295,8 @@ class RoboMasterEKFIntegration:
         # Close log file
         if self.log_writer:
             self.log_writer.close()
+        if self.raw_log_writer:
+            self.raw_log_writer.close()
         
         # Print final statistics
         self._print_final_stats()
@@ -508,6 +514,25 @@ class RoboMasterEKFIntegration:
             logger.error(f"Failed to create log file: {e}")
             self.log_file = None
     
+    def _create_raw_log_file(self):
+        """Create CSV log file for raw sensor data (EKF-independent)"""
+        os.makedirs(self.log_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"robomaster_raw_log_{timestamp}.csv"
+        self.raw_log_file = os.path.join(self.log_dir, filename)
+        header = (
+            "timestamp,accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,"
+            "mag_x,mag_y,mag_z,gps_lat,gps_lon,gps_alt,gps_accuracy,gps_speed,gps_course,"
+            "pressure,altitude,roll,pitch,yaw\n"
+        )
+        try:
+            self.raw_log_writer = open(self.raw_log_file, 'w')
+            self.raw_log_writer.write(header)
+            logger.info(f"Raw sensor log file created: {self.raw_log_file}")
+        except Exception as e:
+            logger.error(f"Failed to create raw log file: {e}")
+            self.raw_log_file = None
+
     def _logging_loop(self):
         """Background logging loop"""
         log_rate = self.config.get('logging', {}).get('rate', 50)
@@ -520,6 +545,7 @@ class RoboMasterEKFIntegration:
             if current_time - last_log_time >= log_interval:
                 try:
                     self._write_log_entry()
+                    self._write_raw_log_entry()
                     last_log_time = current_time
                 except Exception as e:
                     logger.error(f"Logging error: {e}")
@@ -553,6 +579,25 @@ class RoboMasterEKFIntegration:
         
         except Exception as e:
             logger.error(f"Log write error: {e}")
+
+    def _write_raw_log_entry(self):
+        """Write most recent raw sensor data to dedicated raw log file"""
+        if not self.raw_log_writer:
+            return
+        try:
+            latest = self.receiver.get_latest_data()
+            if latest is None:
+                return
+            log_entry = (
+                f"{latest.timestamp},{latest.accel_x},{latest.accel_y},{latest.accel_z},"
+                f"{latest.gyro_x},{latest.gyro_y},{latest.gyro_z},{latest.mag_x},{latest.mag_y},{latest.mag_z},"
+                f"{latest.gps_lat},{latest.gps_lon},{latest.gps_alt},{latest.gps_accuracy},{latest.gps_speed},{latest.gps_course},"
+                f"{latest.pressure},{latest.altitude},{latest.roll},{latest.pitch},{latest.yaw}\n"
+            )
+            self.raw_log_writer.write(log_entry)
+            self.raw_log_writer.flush()
+        except Exception as e:
+            logger.error(f"Raw log write error: {e}")
     
     def _print_status(self, state: RoboMasterState):
         """Print periodic status updates"""
