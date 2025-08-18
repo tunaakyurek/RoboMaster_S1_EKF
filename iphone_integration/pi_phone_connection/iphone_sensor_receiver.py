@@ -431,6 +431,15 @@ class iPhoneDataReceiver:
             acc = get_num(json_data, 'gps_accuracy', acc)
             spd = get_num(json_data, 'gps_speed', spd)
             crs = get_num(json_data, 'gps_course', crs)
+        # Common generic keys used by various apps
+        if lat is None:
+            lat = get_num(json_data, 'lat', None)
+        if lon is None:
+            lon = get_num(json_data, 'lon', None)
+        if lon is None:
+            lon = get_num(json_data, 'lng', None)
+        if alt is None:
+            alt = get_num(json_data, 'alt', None)
         # Generic fallbacks
         if spd is None:
             spd = get_num(json_data, 'speed', None)
@@ -628,7 +637,10 @@ class iPhoneDataProcessor:
             processed['gps'] = {
                 'lat': raw_data.gps_lat,
                 'lon': raw_data.gps_lon,
-                'alt': raw_data.gps_alt
+                'alt': raw_data.gps_alt,
+                'accuracy': raw_data.gps_accuracy,
+                'speed': raw_data.gps_speed,
+                'course': raw_data.gps_course
             }
         
         if raw_data.pressure is not None:

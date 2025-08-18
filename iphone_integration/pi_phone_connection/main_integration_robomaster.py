@@ -113,7 +113,10 @@ class RoboMasterEKFIntegration:
         self.gps_reference = {
             'lat': None,
             'lon': None,
-            'set': False
+            'set': False,
+            'lat_buffer': [],
+            'lon_buffer': [],
+            'warmup_samples': 30  # average first N fixes
         }
         
         logger.info("RoboMaster iPhone-EKF integration initialized (exact formulary)")
@@ -424,7 +427,17 @@ class RoboMasterEKFIntegration:
             if raw_data.yaw is not None:
                 yaw_meas = raw_data.yaw
         
+        # Post-calibration settle: ignore yaw updates for first 2 seconds
+        if self.stats['start_time'] and (time.time() - self.stats['start_time']) < 2.0:
+            return
+        # Magnetometer gating by norm if available
         if yaw_meas is not None:
+            # If mag present in processed_data, check norm stability (optional)
+            mag = processed_data.get('mag', None)
+            if mag is not None:
+                norm = np.linalg.norm(mag)
+                if not (10.0 <= norm <= 80.0):  # broad μT range indoors
+                    return
             self.ekf.update_yaw(yaw_meas)
     
     def _update_with_gps(self, raw_data: iPhoneSensorData, processed_data: Dict):
@@ -432,18 +445,26 @@ class RoboMasterEKFIntegration:
         if 'gps' in processed_data and processed_data['gps']:
             gps_data = processed_data['gps']
             if all(k in gps_data for k in ['lat', 'lon']):
-                self._handle_gps_update(gps_data)
+                self._handle_gps_update(gps_data, processed_data)
     
-    def _handle_gps_update(self, gps_data: Dict):
+    def _handle_gps_update(self, gps_data: Dict, processed_data: Dict = None):
         """Handle GPS updates with coordinate conversion"""
         lat, lon = gps_data['lat'], gps_data['lon']
         
-        # Set reference point on first GPS fix
+        # Build averaged reference from first N good fixes
         if not self.gps_reference['set']:
-            self.gps_reference['lat'] = lat
-            self.gps_reference['lon'] = lon
-            self.gps_reference['set'] = True
-            logger.info(f"GPS reference set: {lat:.6f}, {lon:.6f}")
+            acc = gps_data.get('accuracy', None)
+            # only accept reasonably accurate fixes for origin
+            if acc is None or acc <= 5.0:
+                self.gps_reference['lat_buffer'].append(lat)
+                self.gps_reference['lon_buffer'].append(lon)
+            if len(self.gps_reference['lat_buffer']) >= self.gps_reference['warmup_samples']:
+                self.gps_reference['lat'] = float(np.mean(self.gps_reference['lat_buffer']))
+                self.gps_reference['lon'] = float(np.mean(self.gps_reference['lon_buffer']))
+                self.gps_reference['set'] = True
+                logger.info(f"GPS reference set (avg {len(self.gps_reference['lat_buffer'])}): {self.gps_reference['lat']:.6f}, {self.gps_reference['lon']:.6f}")
+            else:
+                return  # wait until we have enough samples
         
         # Convert to local coordinates
         lat_to_m = 111320.0
@@ -454,13 +475,31 @@ class RoboMasterEKFIntegration:
         
         gps_pos = np.array([x_gps, y_gps])
         
-        # Update EKF with GPS position
-        self.ekf.update_gps_position(gps_pos)
+        # Stationary detection (freeze position when stationary)
+        speed_meas = gps_data.get('speed', None)
+        gyro_z = 0.0
+        if processed_data is not None:
+            gyro_z = processed_data.get('gyro', [0,0,0])[2]
+        is_stationary = ((speed_meas is not None and speed_meas < 0.05) or speed_meas is None) and abs(gyro_z) < 0.02
+        # Accuracy-adaptive gating
+        acc = gps_data.get('accuracy', None)
+        if is_stationary:
+            # Skip GPS position update unless accuracy tight
+            if acc is not None and acc > 1.5:
+                pass  # do not update position
+            else:
+                self.ekf.update_gps_position(gps_pos)
+            # Always apply ZUPT and ZARU when stationary
+            self.ekf.update_zero_velocity(speed_threshold=0.1)
+            self.ekf.update_zero_angular_rate(angular_rate_threshold=0.05)
+        else:
+            # Moving: accept position normally
+            self.ekf.update_gps_position(gps_pos)
         
         # If GPS provides velocity, use it too
         if 'speed' in gps_data and 'course' in gps_data:
-            speed = gps_data['speed']
-            course_rad = np.radians(gps_data['course'])
+            speed = gps_data['speed'] or 0.0
+            course_rad = np.radians(gps_data['course'] or 0.0)
             
             vx_gps = speed * np.cos(course_rad)
             vy_gps = speed * np.sin(course_rad)

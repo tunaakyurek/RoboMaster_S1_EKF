@@ -286,6 +286,30 @@ def plot_raw_sensor_overview(df, output_dir):
     """Create a dedicated figure for raw sensor data (GPS/IMU/Mag/Baro)"""
     print("\n📊 Creating Raw Sensor overview plots...")
 
+    # Ensure relative time exists
+    if 'time_rel' not in df.columns and 'timestamp' in df.columns and len(df) > 0:
+        df['time_rel'] = df['timestamp'] - df['timestamp'].iloc[0]
+
+    # If GPS local coords missing, derive from any lat/lon columns
+    have_local = {'gps_x', 'gps_y'}.issubset(df.columns)
+    have_ll = {'lat','lon'}.issubset(df.columns) or {'gps_lat','gps_lon'}.issubset(df.columns)
+    if not have_local and have_ll:
+        try:
+            if {'lat','lon'}.issubset(df.columns):
+                lat_series = df['lat']
+                lon_series = df['lon']
+            else:
+                lat_series = df['gps_lat']
+                lon_series = df['gps_lon']
+            lat0 = float(lat_series.iloc[0])
+            lon0 = float(lon_series.iloc[0])
+            lat_to_m = 111320.0
+            lon_to_m = 111320.0 * np.cos(np.radians(lat0))
+            df['gps_x'] = (lat_series - lat0) * lat_to_m
+            df['gps_y'] = (lon_series - lon0) * lon_to_m
+        except Exception:
+            pass
+
     fig = plt.figure(figsize=(16, 12))
 
     # 1. GPS 2D trajectory (if available)
