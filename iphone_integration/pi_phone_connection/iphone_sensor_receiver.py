@@ -637,10 +637,7 @@ class iPhoneDataProcessor:
             processed['gps'] = {
                 'lat': raw_data.gps_lat,
                 'lon': raw_data.gps_lon,
-                'alt': raw_data.gps_alt,
-                'accuracy': raw_data.gps_accuracy,
-                'speed': raw_data.gps_speed,
-                'course': raw_data.gps_course
+                'alt': raw_data.gps_alt
             }
         
         if raw_data.pressure is not None:
