@@ -119,6 +119,9 @@ class RoboMasterEKFIntegration:
             'warmup_samples': 30  # average first N fixes
         }
         
+        # Stationary detection flag, updated by the GPS handler
+        self.is_stationary = False
+        
         logger.info("RoboMaster iPhone-EKF integration initialized (exact formulary)")
     
     def _load_config(self, config_file: Optional[str]) -> Dict[str, Any]:
@@ -358,13 +361,14 @@ class RoboMasterEKFIntegration:
                 except Exception as e:
                     logger.error(f"Yaw update failed: {e}")
                 
-                # Apply NHC, ZUPT, and ZARU updates for better observability
-                try:
+                # Apply context-aware constraints based on the stationary flag
+                if self.is_stationary:
+                    # When stationary, aggressively clamp velocity and angular rate
+                    self.ekf.update_zero_velocity(speed_threshold=0.1)
+                    self.ekf.update_zero_angular_rate(angular_rate_threshold=0.05)
+                else:
+                    # When moving, the non-holonomic constraint is useful
                     self.ekf.update_non_holonomic_constraint()
-                    self.ekf.update_zero_velocity()
-                    self.ekf.update_zero_angular_rate()
-                except Exception as e:
-                    logger.error(f"Constraint updates failed: {e}")
                 
                 # Update with GPS if available
                 try:
@@ -447,7 +451,7 @@ class RoboMasterEKFIntegration:
             if all(k in gps_data for k in ['lat', 'lon']):
                 self._handle_gps_update(gps_data, processed_data)
     
-    def _handle_gps_update(self, gps_data: Dict, processed_data: Dict = None):
+    def _handle_gps_update(self, gps_data: Dict, processed_data: Dict):
         """Handle GPS updates with coordinate conversion"""
         lat, lon = gps_data['lat'], gps_data['lon']
         
@@ -466,6 +470,11 @@ class RoboMasterEKFIntegration:
             else:
                 return  # wait until we have enough samples
         
+        # Update the stationary flag based on fresh GPS and IMU data
+        speed_meas = gps_data.get('speed', None)
+        gyro_z = processed_data.get('gyro', [0, 0, 0])[2]
+        self.is_stationary = ((speed_meas is not None and speed_meas < 0.05) or speed_meas is None) and abs(gyro_z) < 0.02
+
         # Convert to local coordinates
         lat_to_m = 111320.0
         lon_to_m = 111320.0 * np.cos(np.radians(self.gps_reference['lat']))
@@ -475,25 +484,14 @@ class RoboMasterEKFIntegration:
         
         gps_pos = np.array([x_gps, y_gps])
         
-        # Stationary detection (freeze position when stationary)
-        speed_meas = gps_data.get('speed', None)
-        gyro_z = 0.0
-        if processed_data is not None:
-            gyro_z = processed_data.get('gyro', [0,0,0])[2]
-        is_stationary = ((speed_meas is not None and speed_meas < 0.05) or speed_meas is None) and abs(gyro_z) < 0.02
         # Accuracy-adaptive gating
         acc = gps_data.get('accuracy', None)
-        if is_stationary:
-            # Skip GPS position update unless accuracy tight
-            if acc is not None and acc > 1.5:
-                pass  # do not update position
-            else:
+        if self.is_stationary:
+            # When stationary, only accept highly accurate GPS fixes to prevent jitter
+            if acc is None or acc <= 1.5:
                 self.ekf.update_gps_position(gps_pos)
-            # Always apply ZUPT and ZARU when stationary
-            self.ekf.update_zero_velocity(speed_threshold=0.1)
-            self.ekf.update_zero_angular_rate(angular_rate_threshold=0.05)
         else:
-            # Moving: accept position normally
+            # When moving, accept all GPS position updates
             self.ekf.update_gps_position(gps_pos)
         
         # If GPS provides velocity, use it too
