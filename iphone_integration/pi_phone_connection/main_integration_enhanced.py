@@ -169,6 +169,8 @@ class EnhancediPhoneEKFIntegration:
         calibration_config = self.config.get('calibration', {})
         duration = calibration_config.get('duration', 5.0)
         min_samples = calibration_config.get('min_samples', 100)
+        # Store for callback window
+        self._calibration_duration = duration
         
         logger.info(f"🔧 Starting {duration}s calibration - keep device STATIONARY")
         logger.info("   This will calibrate accelerometer, gyroscope, and magnetometer")
@@ -179,11 +181,22 @@ class EnhancediPhoneEKFIntegration:
         # Start receiver for calibration
         self.receiver.start(callback=self._calibration_callback)
         
-        # Wait for calibration
-        while (time.time() - self.calibration_start_time) < duration:
+        # Wait for calibration: require both time >= duration and samples >= min_samples,
+        # but allow an extended max duration to tolerate slow links
+        max_duration = max(duration * 3.0, duration + 10.0)
+        last_log_count = 0
+        while True:
+            elapsed = time.time() - self.calibration_start_time
             time.sleep(0.1)
-            if len(self.calibration_data) >= min_samples:
-                logger.info(f"✅ Collected {len(self.calibration_data)} calibration samples")
+            if len(self.calibration_data) >= min_samples and elapsed >= duration:
+                logger.info(f"✅ Calibration requirements met: samples={len(self.calibration_data)}, elapsed={elapsed:.1f}s")
+                break
+            if elapsed >= max_duration:
+                logger.warning(f"⚠️ Calibration reached max duration {max_duration:.1f}s with samples={len(self.calibration_data)}")
+                break
+            if len(self.calibration_data) >= last_log_count + 50:
+                last_log_count = len(self.calibration_data)
+                logger.info(f"✅ Collected {len(self.calibration_data)} calibration samples (elapsed {elapsed:.1f}s)")
         
         # Stop receiver
         self.receiver.stop()
@@ -199,7 +212,10 @@ class EnhancediPhoneEKFIntegration:
     
     def _calibration_callback(self, data: iPhoneSensorData):
         """Callback for calibration data collection"""
-        if self.calibration_start_time and (time.time() - self.calibration_start_time) < 10.0:
+        if not self.calibration_start_time:
+            return
+        # Accept samples within configured calibration window (no hard 10s cap)
+        if (time.time() - self.calibration_start_time) < getattr(self, '_calibration_duration', 5.0) * 3.0:
             self.calibration_data.append(data)
     
     def _process_calibration_data(self):
