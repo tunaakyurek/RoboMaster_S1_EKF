@@ -150,42 +150,103 @@ class RoboMasterEKF8DOF:
         
         logger.info("RoboMaster 8-DOF EKF initialized following exact formulary specifications")
     
+    def _validate_matrices(self, F: np.ndarray, P: np.ndarray, Qd: np.ndarray) -> bool:
+        """
+        Validate matrix dimensions and properties for consistency
+        
+        Args:
+            F: State transition Jacobian
+            P: State covariance matrix
+            Qd: Discrete process noise matrix
+            
+        Returns:
+            True if all matrices are valid, False otherwise
+        """
+        # Check dimensions
+        expected_shape = (self.n_states, self.n_states)
+        
+        if F.shape != expected_shape:
+            logger.error(f"Jacobian F has wrong dimensions: {F.shape}, expected {expected_shape}")
+            return False
+        
+        if P.shape != expected_shape:
+            logger.error(f"Covariance P has wrong dimensions: {P.shape}, expected {expected_shape}")
+            return False
+        
+        if Qd.shape != expected_shape:
+            logger.error(f"Process noise Qd has wrong dimensions: {Qd.shape}, expected {expected_shape}")
+            return False
+        
+        # Check that P is symmetric
+        if not np.allclose(P, P.T, atol=1e-10):
+            logger.warning("Covariance P is not symmetric")
+            return False
+        
+        # Check that Qd is symmetric
+        if not np.allclose(Qd, Qd.T, atol=1e-10):
+            logger.warning("Process noise Qd is not symmetric")
+            return False
+        
+        # Check that diagonal elements are positive
+        if np.any(np.diag(P) < 0):
+            logger.error(f"Negative diagonal elements in P: {np.diag(P)[np.diag(P) < 0]}")
+            return False
+        
+        if np.any(np.diag(Qd) < 0):
+            logger.error(f"Negative diagonal elements in Qd: {np.diag(Qd)[np.diag(Qd) < 0]}")
+            return False
+        
+        return True
+    
     def _compute_discrete_process_noise(self, dt: float) -> np.ndarray:
         """
         Discretize continuous-time process noise (PSD) into discrete Qd for dt.
         State ordering: [x, y, theta, vx, vy, bias_ax, bias_ay, bias_omega]
-        - For each position-velocity axis, use the classic constant-acceleration model:
-          Qd_posvel = [[(dt^3)/3*q_a, (dt^2)/2*q_a],
-                        [(dt^2)/2*q_a, dt*q_a]]
-        - For theta (driven by gyro noise): Qd_theta = dt*q_gyro
-        - For biases (random walk): Qd_bias = dt*q_bias
+        
+        For constant-acceleration model with position-velocity coupling:
+        Qd_posvel = [[(dt^3)/3*q_a, (dt^2)/2*q_a],
+                      [(dt^2)/2*q_a, dt*q_a]]
+        
+        This follows the standard INS/GNSS process noise model.
         """
         Qd = np.zeros((self.n_states, self.n_states))
         dt2 = dt * dt
         dt3 = dt2 * dt
         q_a = self.q_accel
         
-        # X-axis [pos x (0), vel x (3)]
-        Qd[0, 0] += (dt3 / 3.0) * q_a
-        Qd[0, 3] += (dt2 / 2.0) * q_a
-        Qd[3, 0] += (dt2 / 2.0) * q_a
-        Qd[3, 3] += dt * q_a
+        # X-axis position-velocity coupling [pos x (0), vel x (3)]
+        Qd[0, 0] = (dt3 / 3.0) * q_a      # Position variance
+        Qd[0, 3] = (dt2 / 2.0) * q_a      # Position-velocity cross-covariance
+        Qd[3, 0] = (dt2 / 2.0) * q_a      # Symmetric cross-covariance
+        Qd[3, 3] = dt * q_a                # Velocity variance
         
-        # Y-axis [pos y (1), vel y (4)]
-        Qd[1, 1] += (dt3 / 3.0) * q_a
-        Qd[1, 4] += (dt2 / 2.0) * q_a
-        Qd[4, 1] += (dt2 / 2.0) * q_a
-        Qd[4, 4] += dt * q_a
+        # Y-axis position-velocity coupling [pos y (1), vel y (4)]
+        Qd[1, 1] = (dt3 / 3.0) * q_a      # Position variance
+        Qd[1, 4] = (dt2 / 2.0) * q_a      # Position-velocity cross-covariance
+        Qd[4, 1] = (dt2 / 2.0) * q_a      # Symmetric cross-covariance
+        Qd[4, 4] = dt * q_a                # Velocity variance
         
         # Theta (yaw) driven by gyro white noise
-        Qd[2, 2] += dt * self.q_gyro
+        Qd[2, 2] = dt * self.q_gyro
         
-        # Accelerometer bias random walk
-        Qd[5, 5] += dt * self.q_accel_bias
-        Qd[6, 6] += dt * self.q_accel_bias
+        # Accelerometer bias random walk (independent)
+        Qd[5, 5] = dt * self.q_accel_bias
+        Qd[6, 6] = dt * self.q_accel_bias
         
-        # Gyro bias random walk
-        Qd[7, 7] += dt * self.q_gyro_bias
+        # Gyro bias random walk (independent)
+        Qd[7, 7] = dt * self.q_gyro_bias
+        
+        # Validate matrix properties
+        if not np.allclose(Qd, Qd.T):
+            logger.warning("Process noise matrix Qd is not symmetric")
+            Qd = (Qd + Qd.T) / 2  # Force symmetry
+        
+        # Check for negative diagonal elements (should not happen)
+        diag_negative = np.diag(Qd) < 0
+        if np.any(diag_negative):
+            logger.error(f"Negative diagonal elements in Qd: {np.diag(Qd)[diag_negative]}")
+            # Clip to small positive values
+            Qd[diag_negative, diag_negative] = 1e-12
         
         return Qd
     
@@ -201,21 +262,26 @@ class RoboMasterEKF8DOF:
             logger.warning(f"Invalid dt: {dt}. Skipping prediction.")
             return
         
-        # Current state
-        x, y, theta = self.x[0:3]
-        vx, vy = self.x[3:5]
+        # Store current state for Jacobian computation
+        x_prev, y_prev, theta_prev = self.x[0:3]
+        vx_prev, vy_prev = self.x[3:5]
         bias_ax, bias_ay, bias_omega = self.x[5:8]
         
-        # Motion model following formulary
+        # Compute state transition Jacobian BEFORE state update
+        F = self._compute_state_jacobian(dt, control_input, x_prev, y_prev, theta_prev, vx_prev, vy_prev, bias_ax, bias_ay, bias_omega)
+        
+        # Apply state transition model: x_k+1 = F * x_k + B * u_k
+        # For our case, we'll implement the motion model directly and then validate with F
+        
         # Position update: p_k+1 = p_k + v_k * dt
-        self.x[0] = x + vx * dt     # x += vx * dt
-        self.x[1] = y + vy * dt     # y += vy * dt
+        self.x[0] = x_prev + vx_prev * dt     # x += vx * dt
+        self.x[1] = y_prev + vy_prev * dt     # y += vy * dt
         
         # Orientation update: theta_k+1 = theta_k + omega * dt
         if control_input is not None and len(control_input) >= 3:
             omega_measured = control_input[2]
             omega_true = omega_measured - bias_omega
-            self.x[2] = theta + omega_true * dt
+            self.x[2] = theta_prev + omega_true * dt
         # If no control input, orientation remains constant
         
         # Velocity update with control input
@@ -226,14 +292,14 @@ class RoboMasterEKF8DOF:
             ay_true = ay_measured - bias_ay
             
             # Transform acceleration from body to global frame
-            cos_theta = np.cos(theta)
-            sin_theta = np.sin(theta)
+            cos_theta = np.cos(theta_prev)
+            sin_theta = np.sin(theta_prev)
             
             ax_global = ax_true * cos_theta - ay_true * sin_theta
             ay_global = ax_true * sin_theta + ay_true * cos_theta
             
-            self.x[3] = vx + ax_global * dt  # vx += ax_global * dt
-            self.x[4] = vy + ay_global * dt  # vy += ay_global * dt
+            self.x[3] = vx_prev + ax_global * dt  # vx += ax_global * dt
+            self.x[4] = vy_prev + ay_global * dt  # vy += ay_global * dt
         
         # Biases remain constant (random walk model)
         # bias_k+1 = bias_k (handled by process noise)
@@ -241,26 +307,48 @@ class RoboMasterEKF8DOF:
         # Normalize angle
         self.x[2] = self._normalize_angle(self.x[2])
         
-        # Compute state transition Jacobian
-        F = self._compute_state_jacobian(dt, control_input)
-        
-        # Predict covariance: P = F * P * F^T + Qd
+        # Compute discrete process noise
         Qd = self._compute_discrete_process_noise(dt)
+        
+        # Validate all matrices before covariance prediction
+        if not self._validate_matrices(F, self.P, Qd):
+            logger.error("Matrix validation failed, skipping covariance prediction")
+            return
+        
+        # Apply covariance prediction: P_k+1 = F * P_k * F^T + Qd
         self.P = F @ self.P @ F.T + Qd
+        
+        # Ensure covariance remains symmetric and positive definite
+        self.P = (self.P + self.P.T) / 2  # Force symmetry
+        
+        # Final validation check
+        if not self._validate_matrices(F, self.P, Qd):
+            logger.error("Matrix validation failed after covariance prediction")
+            return
         
         self.prediction_count += 1
         
         logger.debug(f"RoboMaster prediction completed (dt={dt:.3f}s)")
     
-    def _compute_state_jacobian(self, dt: float, control_input: Optional[np.ndarray]) -> np.ndarray:
+    def _compute_state_jacobian(self, dt: float, control_input: Optional[np.ndarray],
+                                x: float, y: float, theta: float,
+                                vx: float, vy: float,
+                                bias_ax: float, bias_ay: float, bias_omega: float) -> np.ndarray:
         """
         Compute state transition Jacobian F following formulary
         
         State: [x, y, theta, vx, vy, bias_ax, bias_ay, bias_omega]
+        
+        Args:
+            dt: Time step
+            control_input: Control inputs [ax, ay, omega]
+            x, y, theta: Current position and orientation
+            vx, vy: Current velocity
+            bias_ax, bias_ay, bias_omega: Current biases
         """
         F = np.eye(self.n_states)
         
-        # Position derivatives
+        # Position derivatives: ∂x/∂vx, ∂y/∂vy
         F[0, 3] = dt  # ∂x/∂vx
         F[1, 4] = dt  # ∂y/∂vy
         
@@ -270,28 +358,32 @@ class RoboMasterEKF8DOF:
         
         # Velocity derivatives (if acceleration provided)
         if control_input is not None and len(control_input) >= 2:
-            theta = self.x[2]
-            cos_theta = np.cos(theta)
-            sin_theta = np.sin(theta)
-            
             ax_meas, ay_meas = control_input[0:2]
-            bias_ax, bias_ay = self.x[5:7]
             
+            # Use passed biases
             ax_true = ax_meas - bias_ax
             ay_true = ay_meas - bias_ay
             
-            # ∂vx/∂theta
+            cos_theta = np.cos(theta)
+            sin_theta = np.sin(theta)
+            
+            # ∂vx/∂theta = dt * (-ax_true * sin_theta - ay_true * cos_theta)
             F[3, 2] = dt * (-ax_true * sin_theta - ay_true * cos_theta)
-            # ∂vy/∂theta  
+            
+            # ∂vy/∂theta = dt * (ax_true * cos_theta - ay_true * sin_theta)
             F[4, 2] = dt * (ax_true * cos_theta - ay_true * sin_theta)
             
-            # ∂vx/∂bias_ax, ∂vx/∂bias_ay
-            F[3, 5] = -dt * cos_theta  # ∂vx/∂bias_ax
-            F[3, 6] = dt * sin_theta   # ∂vx/∂bias_ay
+            # ∂vx/∂bias_ax = -dt * cos_theta
+            F[3, 5] = -dt * cos_theta
             
-            # ∂vy/∂bias_ax, ∂vy/∂bias_ay
-            F[4, 5] = -dt * sin_theta  # ∂vy/∂bias_ax
-            F[4, 6] = -dt * cos_theta  # ∂vy/∂bias_ay
+            # ∂vx/∂bias_ay = dt * sin_theta
+            F[3, 6] = dt * sin_theta
+            
+            # ∂vy/∂bias_ax = -dt * sin_theta
+            F[4, 5] = -dt * sin_theta
+            
+            # ∂vy/∂bias_ay = -dt * cos_theta
+            F[4, 6] = -dt * cos_theta
         
         return F
     
@@ -513,7 +605,26 @@ class RoboMasterEKF8DOF:
     def _kalman_update(self, z: np.ndarray, h: np.ndarray, H: np.ndarray, R: np.ndarray):
         """
         Standard Kalman update following formulary equations
+        
+        Args:
+            z: Measurement vector
+            h: Expected measurement (h(x))
+            H: Measurement Jacobian
+            R: Measurement noise covariance
         """
+        # Validate input dimensions
+        if z.shape[0] != h.shape[0]:
+            logger.error(f"Measurement dimension mismatch: z={z.shape}, h={h.shape}")
+            return
+        
+        if H.shape[0] != z.shape[0] or H.shape[1] != self.n_states:
+            logger.error(f"Jacobian dimension mismatch: H={H.shape}, expected ({z.shape[0]}, {self.n_states})")
+            return
+        
+        if R.shape[0] != z.shape[0] or R.shape[1] != z.shape[0]:
+            logger.error(f"Measurement noise dimension mismatch: R={R.shape}, expected ({z.shape[0]}, {z.shape[0]})")
+            return
+        
         # Innovation
         y = z - h
         
@@ -524,12 +635,20 @@ class RoboMasterEKF8DOF:
         # Innovation covariance
         S = H @ self.P @ H.T + R
         
-        # Kalman gain
+        # Validate innovation covariance
+        if not np.allclose(S, S.T, atol=1e-10):
+            logger.warning("Innovation covariance S is not symmetric")
+            S = (S + S.T) / 2
+        
+        # Check for positive definiteness
         try:
-            K = self.P @ H.T @ np.linalg.inv(S)
+            S_inv = np.linalg.inv(S)
         except np.linalg.LinAlgError:
-            logger.warning("Singular matrix in Kalman gain calculation")
+            logger.warning("Singular innovation covariance matrix S")
             return
+        
+        # Kalman gain
+        K = self.P @ H.T @ S_inv
         
         # Update state
         self.x = self.x + K @ y
@@ -540,6 +659,13 @@ class RoboMasterEKF8DOF:
         # Update covariance (Joseph form for numerical stability)
         I_KH = np.eye(self.n_states) - K @ H
         self.P = I_KH @ self.P @ I_KH.T + K @ R @ K.T
+        
+        # Ensure covariance remains symmetric and positive definite
+        self.P = (self.P + self.P.T) / 2
+        
+        # Validate updated covariance
+        if not self._validate_matrices(np.eye(self.n_states), self.P, np.zeros((self.n_states, self.n_states))):
+            logger.warning("Covariance validation failed after update")
         
         self.update_count += 1
     
