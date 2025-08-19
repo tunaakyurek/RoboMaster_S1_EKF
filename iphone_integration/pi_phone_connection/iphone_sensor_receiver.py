@@ -634,11 +634,21 @@ class iPhoneDataProcessor:
             ]
         
         if raw_data.gps_lat is not None:
-            processed['gps'] = {
+            gps_dict = {
                 'lat': raw_data.gps_lat,
                 'lon': raw_data.gps_lon,
-                'alt': raw_data.gps_alt
+                'alt': raw_data.gps_alt,
+                'accuracy': raw_data.gps_accuracy,
+                'speed': raw_data.gps_speed,
+                'course': raw_data.gps_course
             }
+            # Provide velocity vector if speed & course available
+            if raw_data.gps_speed is not None and raw_data.gps_course is not None:
+                import numpy as _np
+                course_rad = _np.radians(raw_data.gps_course)
+                gps_dict['velocity'] = [raw_data.gps_speed * _np.cos(course_rad),
+                                        raw_data.gps_speed * _np.sin(course_rad)]
+            processed['gps'] = gps_dict
         
         if raw_data.pressure is not None:
             processed['baro'] = {

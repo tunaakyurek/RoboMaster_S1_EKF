@@ -101,6 +101,11 @@ class RoboMasterEKFIntegration:
         self.calibration_data = []
         self.calibration_start_time = None
         self._calibration_duration = None
+        # GPS/Stationary helpers
+        self._last_gyro_z = 0.0
+        self._gps_origin_samples: list[tuple[float, float]] = []
+        self._gps_origin_set = False
+        self._gps_lpf = None  # low-pass filtered [x,y]
         
         # Statistics
         self.stats = {
@@ -307,6 +312,9 @@ class RoboMasterEKFIntegration:
             return
         try:
             processed_data = self.processor.process(data)
+            # Track latest yaw-rate for stationary gating
+            if 'gyro' in processed_data and len(processed_data['gyro']) >= 3:
+                self._last_gyro_z = processed_data['gyro'][2]
         except Exception as e:
             logger.error(f"Data processing failed: {e}")
             return
@@ -1013,50 +1021,70 @@ class RoboMasterEKFIntegration:
                 self._handle_gps_update(gps_data)
     
     def _handle_gps_update(self, gps_data: Dict):
-        """Handle GPS updates with coordinate conversion"""
+        """Handle GPS with origin averaging, stationary gating, LPF, and R adaptation"""
         lat, lon = gps_data['lat'], gps_data['lon']
-        
-        # Set reference point on first GPS fix
-        if not self.gps_reference['set']:
-            self.gps_reference['lat'] = lat
-            self.gps_reference['lon'] = lon
+        accuracy = gps_data.get('accuracy', None)
+        speed = gps_data.get('speed', None)
+        course = gps_data.get('course', None)
+
+        # Build averaged origin first
+        if not self._gps_origin_set:
+            self._gps_origin_samples.append((lat, lon))
+            if len(self._gps_origin_samples) < 50:  # ~1s at 50Hz; adjust to your GPS update rate
+                return
+            lat0 = sum(a for a, _ in self._gps_origin_samples) / len(self._gps_origin_samples)
+            lon0 = sum(b for _, b in self._gps_origin_samples) / len(self._gps_origin_samples)
+            self.gps_reference['lat'] = lat0
+            self.gps_reference['lon'] = lon0
             self.gps_reference['set'] = True
-            logger.info(f"GPS reference set: {lat:.6f}, {lon:.6f}")
-        
-        # Convert to local coordinates
+            self._gps_origin_set = True
+            self._gps_origin_samples.clear()
+            logger.info(f"GPS reference (averaged) set: {lat0:.6f}, {lon0:.6f}")
+
+        # Convert to local meters
         lat_to_m = 111320.0
         lon_to_m = 111320.0 * np.cos(np.radians(self.gps_reference['lat']))
-        
         x_gps = (lat - self.gps_reference['lat']) * lat_to_m
         y_gps = (lon - self.gps_reference['lon']) * lon_to_m
-        
         gps_pos = np.array([x_gps, y_gps])
-        
-        # Update EKF with GPS position
-        self.ekf.update_gps_position(gps_pos)
-        
-        # If GPS provides velocity, use it too
-        if 'speed' in gps_data and 'course' in gps_data:
-            speed = gps_data['speed']
-            course_rad = np.radians(gps_data['course'])
-            
-            vx_gps = speed * np.cos(course_rad)
-            vy_gps = speed * np.sin(course_rad)
-            gps_vel = np.array([vx_gps, vy_gps])
-            
-            self.ekf.update_gps_velocity(gps_vel)
-            
-            # GPS course-based yaw update when speed is sufficient (>0.7 m/s)
-            if speed > 0.7:  # Gate by speed to avoid jitter at low speeds
-                # Convert GPS course to yaw (course is 0-360°, yaw is -π to π)
-                # Course 0° = North, Course 90° = East
-                # Yaw 0 = North, Yaw π/2 = East
-                yaw_course = course_rad - np.pi/2  # Adjust for coordinate system
+
+        # Low-pass the GPS position to reduce jitter
+        alpha = 0.2
+        if self._gps_lpf is None:
+            self._gps_lpf = gps_pos.copy()
+        else:
+            self._gps_lpf = alpha * gps_pos + (1 - alpha) * self._gps_lpf
+        gps_pos_filtered = self._gps_lpf
+
+        # Stationary gating: skip GPS position fusion when nearly still
+        is_slow = (speed is not None and speed < 0.05)
+        is_not_turning = abs(self._last_gyro_z) < 0.02
+        if is_slow and is_not_turning:
+            # Optionally fuse velocity if provided (near zero)
+            if 'velocity' in gps_data and gps_data['velocity'] is not None:
+                self.ekf.update_gps_velocity(np.array(gps_data['velocity']))
+            return
+
+        # Adapt R_gps_pos from accuracy if available
+        if accuracy is not None:
+            sigma = max(float(accuracy), 1.5)
+            self.ekf.R_gps_pos = np.eye(2) * (sigma ** 2)
+        else:
+            self.ekf.R_gps_pos = np.eye(2) * (3.0 ** 2)
+
+        # Fuse position
+        self.ekf.update_gps_position(gps_pos_filtered)
+
+        # Velocity and course yaw when moving
+        if 'velocity' in gps_data and gps_data['velocity'] is not None:
+            self.ekf.update_gps_velocity(np.array(gps_data['velocity']))
+        elif speed is not None and course is not None:
+            course_rad = np.radians(course)
+            self.ekf.update_gps_velocity(np.array([speed * np.cos(course_rad), speed * np.sin(course_rad)]))
+            if speed > 0.7:
+                yaw_course = course_rad - np.pi / 2
                 yaw_course = self._normalize_angle(yaw_course)
-                
-                # Update EKF with GPS-derived yaw
                 self.ekf.update_yaw(yaw_course)
-                logger.debug(f"GPS course yaw update: course={np.degrees(course_rad):.1f}°, yaw={np.degrees(yaw_course):.1f}°, speed={speed:.2f} m/s")
     
     def _update_autonomous_controller(self, state: RoboMasterState):
         """Update autonomous controller with current state"""
