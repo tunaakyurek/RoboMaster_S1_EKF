@@ -306,22 +306,124 @@ class RoboMasterEKFIntegration:
         logger.info("RoboMaster integration system stopped")
     
     def _sensor_data_callback(self, data: iPhoneSensorData):
-        """Process incoming sensor data"""
+        """Process incoming sensor data with robust error handling"""
         if not self.is_running:
             return
+        
         try:
+            # Validate sensor data quality before processing
+            if not self._validate_sensor_data(data):
+                logger.warning(f"Skipping invalid sensor data: {data}")
+                return
+            
             processed_data = self.processor.process(data)
+            
+            # Additional validation of processed data
+            if not self._validate_processed_data(processed_data):
+                logger.warning(f"Skipping invalid processed data")
+                return
+            
             # Track latest yaw-rate for stationary gating
             if 'gyro' in processed_data and len(processed_data['gyro']) >= 3:
                 self._last_gyro_z = processed_data['gyro'][2]
+                
         except Exception as e:
             logger.error(f"Data processing failed: {e}")
             return
+        
+        # Only add valid data to queue
         if not self.state_queue.full():
             self.state_queue.put((data, processed_data))
             self.stats['packets_processed'] += 1
         else:
             logger.warning("State queue full, dropping data")
+    
+    def _validate_sensor_data(self, data: iPhoneSensorData) -> bool:
+        """Validate raw sensor data quality"""
+        try:
+            # Check for NaN or infinite values
+            for attr in ['accel_x', 'accel_y', 'accel_z', 'gyro_x', 'gyro_y', 'gyro_z']:
+                value = getattr(data, attr)
+                if not np.isfinite(value) or abs(value) > 1000:  # Reasonable sensor limits
+                    logger.warning(f"Invalid {attr}: {value}")
+                    return False
+            
+            # Validate GPS data if present
+            if hasattr(data, 'gps_lat') and data.gps_lat is not None:
+                if not (-90 <= data.gps_lat <= 90) or not np.isfinite(data.gps_lat):
+                    logger.warning(f"Invalid GPS lat: {data.gps_lat}")
+                    return False
+            if hasattr(data, 'gps_lon') and data.gps_lon is not None:
+                if not (-180 <= data.gps_lon <= 180) or not np.isfinite(data.gps_lon):
+                    logger.warning(f"Invalid GPS lon: {data.gps_lon}")
+                    return False
+            
+            # Validate magnetometer data
+            for attr in ['mag_x', 'mag_y', 'mag_z']:
+                value = getattr(data, attr)
+                if not np.isfinite(value) or abs(value) > 10000:  # Reasonable mag limits
+                    logger.warning(f"Invalid {attr}: {value}")
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Data validation error: {e}")
+            return False
+    
+    def _validate_processed_data(self, processed_data: Dict) -> bool:
+        """Validate processed sensor data"""
+        try:
+            # Check accelerometer data
+            if 'accel' in processed_data:
+                accel = processed_data['accel']
+                if len(accel) != 3 or not all(np.isfinite(v) for v in accel):
+                    logger.warning("Invalid accelerometer data")
+                    return False
+                # Check for reasonable acceleration values (excluding gravity)
+                if any(abs(v) > 50 for v in accel[:2]):  # X,Y should be reasonable
+                    logger.warning(f"Unreasonable acceleration: {accel}")
+                    return False
+            
+            # Check gyroscope data
+            if 'gyro' in processed_data:
+                gyro = processed_data['gyro']
+                if len(gyro) != 3 or not all(np.isfinite(v) for v in gyro):
+                    logger.warning("Invalid gyroscope data")
+                    return False
+                # Check for reasonable angular velocity values
+                if any(abs(v) > 10 for v in gyro):  # Should be reasonable rad/s
+                    logger.warning(f"Unreasonable angular velocity: {gyro}")
+                    return False
+            
+            # Check GPS data if present
+            if 'gps' in processed_data and processed_data['gps']:
+                gps = processed_data['gps']
+                if 'lat' in gps and 'lon' in gps:
+                    lat, lon = gps['lat'], gps['lon']
+                    if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+                        logger.warning(f"Invalid GPS coordinates: {lat}, {lon}")
+                        return False
+                    
+                    # Check for reasonable speed values
+                    if 'speed' in gps:
+                        speed = gps['speed']
+                        if not np.isfinite(speed) or speed < 0 or speed > 100:  # 0-100 m/s reasonable
+                            logger.warning(f"Invalid GPS speed: {speed}")
+                            return False
+                    
+                    # Check for reasonable course values
+                    if 'course' in gps:
+                        course = gps['course']
+                        if not np.isfinite(course) or not (0 <= course <= 360):
+                            logger.warning(f"Invalid GPS course: {course}")
+                            return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Processed data validation error: {e}")
+            return False
     
     def _ekf_processing_loop(self):
         """Main EKF processing loop following RoboMaster formulary"""
@@ -334,6 +436,10 @@ class RoboMasterEKFIntegration:
                 dt = current_time - last_time
                 
                 control_input = self._prepare_control_input(raw_data, processed_data)
+                if control_input is None:
+                    logger.warning("Skipping EKF update due to invalid control input.")
+                    continue
+                
                 try:
                     self.ekf.predict(dt, control_input)
                 except Exception as e:
@@ -374,9 +480,58 @@ class RoboMasterEKFIntegration:
     
     def _prepare_control_input(self, raw_data: iPhoneSensorData, processed_data: Dict) -> np.ndarray:
         """Prepare control input for RoboMaster EKF: [ax_body, ay_body, omega_z]"""
-        accel = processed_data.get('accel', [0.0, 0.0, 0.0])
-        gyro = processed_data.get('gyro', [0.0, 0.0, 0.0])
-        return np.array([accel[0], accel[1], gyro[2]])
+        try:
+            accel = processed_data.get('accel', [0.0, 0.0, 0.0])
+            gyro = processed_data.get('gyro', [0.0, 0.0, 0.0])
+            return np.array([accel[0], accel[1], gyro[2]])
+        except Exception as e:
+            logger.error(f"Control input preparation error: {e}")
+            return None
+    
+    def _is_state_valid(self, state: RoboMasterState) -> bool:
+        """Check if EKF state is valid and reasonable"""
+        try:
+            # Check for NaN or infinite values
+            if not all(np.isfinite(v) for v in [state.x, state.y, state.theta, state.vx, state.vy, 
+                                               state.bias_accel_x, state.bias_accel_y, state.bias_angular_velocity]):
+                return False
+            
+            # Check for reasonable values
+            if abs(state.x) > 10000 or abs(state.y) > 10000:  # 10km limit
+                return False
+            
+            if abs(state.vx) > 100 or abs(state.vy) > 100:  # 100 m/s limit
+                return False
+            
+            if abs(state.bias_accel_x) > 10 or abs(state.bias_accel_y) > 10:  # 10 m/s² bias limit
+                return False
+            
+            if abs(state.bias_angular_velocity) > 1:  # 1 rad/s bias limit
+                return False
+            
+            return True
+            
+        except Exception:
+            return False
+    
+    def _attempt_recovery(self):
+        """Simple recovery mechanism"""
+        try:
+            logger.info("Attempting system recovery...")
+            
+            # Reset EKF to last known good state or default
+            if hasattr(self, 'last_good_state') and self.last_good_state:
+                logger.info("Restoring last known good state")
+                self.ekf.reset(self.last_good_state)
+            else:
+                logger.info("Resetting EKF to default state")
+                self.ekf.reset()
+            
+            # Clear error counters and continue
+            logger.info("Recovery completed")
+            
+        except Exception as e:
+            logger.error(f"Recovery failed: {e}")
     
     def _update_with_gps(self, raw_data: iPhoneSensorData, processed_data: Dict):
         """Update EKF with GPS (position and optional velocity)"""
@@ -519,7 +674,7 @@ class RoboMasterEKFIntegration:
     
     def _print_status(self, state: RoboMasterState):
         """Print periodic status updates"""
-        runtime = time.time() - self.stats['start_time']
+        runtime = time.time() - self.stats['start_time'] if self.stats['start_time'] else 0
         rate = self.stats['ekf_updates'] / runtime if runtime > 0 else 0
         logger.info(f"Stats: EKF updates={self.stats['ekf_updates']}, Packets={self.stats['packets_processed']}, Rate={rate:.1f} Hz")
         logger.info(f"State: {state}")
