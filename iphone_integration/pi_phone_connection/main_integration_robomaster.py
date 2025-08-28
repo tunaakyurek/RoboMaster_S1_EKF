@@ -97,11 +97,13 @@ class RoboMasterEKFIntegration:
         self.ekf_thread = None
         self.log_thread = None
         
-        # Calibration
+        # Calibration and phased startup (pre-delay → calibration → running)
         self.is_calibrated = False
         self.calibration_data = []
         self.calibration_start_time = None
         self._calibration_duration = None
+        self.first_packet_time = None
+        self._phase = 'idle'  # idle | pre_delay | calibrating | running
         # GPS/Stationary helpers
         self._last_gyro_z = 0.0
         self._gps_origin_samples: list[tuple[float, float]] = []
@@ -264,8 +266,12 @@ class RoboMasterEKFIntegration:
     
     def start(self, state_callback: Optional[callable] = None):
         """Start the RoboMaster integration system"""
-        if not self.is_calibrated and self.config.get('calibration', {}).get('auto_calibrate', True):
-            self.calibrate()
+        # Use phased calibration driven by incoming packets: pre-delay then calibration then run
+        if self.config.get('calibration', {}).get('auto_calibrate', True):
+            self._phase = 'idle'
+        else:
+            self._phase = 'running'
+            self.is_calibrated = True
         
         self.state_callback = state_callback
         self.is_running = True
@@ -438,6 +444,39 @@ class RoboMasterEKFIntegration:
                 current_time = time.time()
                 dt = current_time - last_time
                 
+                # Phased startup handling
+                if not self.is_calibrated:
+                    now = time.time()
+                    calib_cfg = self.config.get('calibration', {})
+                    pre_delay = float(calib_cfg.get('pre_start_delay_seconds', 5.0))
+                    calib_duration = float(calib_cfg.get('duration', 5.0))
+
+                    if self.first_packet_time is None:
+                        self.first_packet_time = now
+                        self._phase = 'pre_delay'
+                        logger.info(f"Pre-calibration delay started ({pre_delay:.1f}s). Place rover at initial pose.")
+                    elif self._phase == 'pre_delay' and (now - self.first_packet_time) >= pre_delay:
+                        self._phase = 'calibrating'
+                        self.calibration_data = []
+                        self.calibration_start_time = now
+                        self._calibration_duration = calib_duration
+                        logger.info(f"Calibration started for {calib_duration:.1f}s. Keep device stationary.")
+                    elif self._phase == 'calibrating':
+                        self.calibration_data.append(raw_data)
+                        if (now - (self.calibration_start_time or now)) >= calib_duration:
+                            try:
+                                self._process_calibration_data()
+                                self.is_calibrated = True
+                                self._phase = 'running'
+                                logger.info("Calibration complete. EKF is now running.")
+                            except Exception as e:
+                                logger.error(f"Calibration failed: {e}")
+                                self.is_calibrated = True
+                                self._phase = 'running'
+
+                    last_time = current_time
+                    continue
+
                 control_input = self._prepare_control_input(raw_data, processed_data)
                 if control_input is None:
                     # If no control input (e.g., stream pause), keep EKF alive by skipping update
