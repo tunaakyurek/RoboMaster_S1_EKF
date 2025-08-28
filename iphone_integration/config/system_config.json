@@ -15,7 +15,8 @@
     "calibration": {
       "duration": 5.0,
       "min_samples": 100,
-      "auto_calibrate": true
+      "auto_calibrate": true,
+      "pre_start_delay_seconds": 5.0
     }
   },
   

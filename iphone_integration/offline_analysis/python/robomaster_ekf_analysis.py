@@ -19,7 +19,7 @@ import sys
 
 def load_robomaster_data(csv_file):
     """Load RoboMaster EKF CSV log file"""
-    print(f"📁 Loading RoboMaster EKF data from: {csv_file}")
+    print(f"Loading RoboMaster EKF data from: {csv_file}")
     
     # Expected columns for RoboMaster formulary
     expected_cols = [
@@ -43,13 +43,13 @@ def load_robomaster_data(csv_file):
     
     try:
         df = pd.read_csv(csv_file)
-        print(f"✅ Loaded {len(df)} samples")
-        print(f"📊 Columns: {list(df.columns)}")
+        print(f"Loaded {len(df)} samples")
+        print(f"Columns: {list(df.columns)}")
         
         # Validate columns
         missing_cols = [col for col in expected_cols if col not in df.columns]
         if missing_cols:
-            print(f"⚠️ Missing columns: {missing_cols}")
+            print(f"Missing columns: {missing_cols}")
         
         # Convert timestamp to relative time
         df['time_rel'] = df['timestamp'] - df['timestamp'].iloc[0]
@@ -73,18 +73,18 @@ def load_robomaster_data(csv_file):
             except Exception:
                 pass
         
-        print(f"⏱️ Data duration: {df['time_rel'].iloc[-1]:.1f} seconds")
-        print(f"📈 Sampling rate: {len(df) / df['time_rel'].iloc[-1]:.1f} Hz")
+        print(f"Data duration: {df['time_rel'].iloc[-1]:.1f} seconds")
+        print(f"Sampling rate: {len(df) / df['time_rel'].iloc[-1]:.1f} Hz")
         
         return df
         
     except Exception as e:
-        print(f"❌ Error loading file: {e}")
+        print(f"Error loading file: {e}")
         return None
 
 def analyze_robomaster_trajectory(df):
     """Analyze RoboMaster trajectory data"""
-    print("\n🎯 RoboMaster Trajectory Analysis")
+    print("\nRoboMaster Trajectory Analysis")
     print("=" * 50)
     
     # Position statistics
@@ -118,23 +118,23 @@ def analyze_robomaster_trajectory(df):
         'bias_convergence_y': np.abs(df['bias_accel_y'].iloc[-1] - df['bias_accel_y'].iloc[len(df)//2])
     }
     
-    print("📍 Position Analysis:")
+    print("Position Analysis:")
     print(f"   X range: {pos_stats['x_range']:.3f} m")
     print(f"   Y range: {pos_stats['y_range']:.3f} m")
     print(f"   Total distance: {pos_stats['total_distance']:.3f} m")
     print(f"   Max distance from origin: {pos_stats['max_distance_from_origin']:.3f} m")
     
-    print("\n🚀 Velocity Analysis:")
+    print("\nVelocity Analysis:")
     print(f"   Max vx: {vel_stats['max_vx']:.3f} m/s")
     print(f"   Max vy: {vel_stats['max_vy']:.3f} m/s")
     print(f"   Max speed: {vel_stats['max_speed']:.3f} m/s")
     print(f"   Average speed: {vel_stats['avg_speed']:.3f} m/s")
     
-    print("\n🔄 Orientation Analysis:")
+    print("\nOrientation Analysis:")
     print(f"   Theta range: {theta_stats['theta_range_deg']:.1f}°")
     print(f"   Max angular change: {theta_stats['max_angular_change']:.1f}°")
     
-    print("\n⚖️ Sensor Bias Analysis:")
+    print("\nSensor Bias Analysis:")
     print(f"   Final accel bias X: {bias_stats['final_bias_accel_x']:.4f} m/s²")
     print(f"   Final accel bias Y: {bias_stats['final_bias_accel_y']:.4f} m/s²")
     print(f"   Final angular bias: {bias_stats['final_bias_angular']:.4f} rad/s")
@@ -145,7 +145,7 @@ def analyze_robomaster_trajectory(df):
 
 def plot_robomaster_analysis(df, output_dir):
     """Create comprehensive RoboMaster analysis plots"""
-    print(f"\n📊 Creating RoboMaster analysis plots...")
+    print(f"\nCreating RoboMaster analysis plots...")
     
     # Create figure with subplots
     fig = plt.figure(figsize=(16, 12))
@@ -278,13 +278,13 @@ def plot_robomaster_analysis(df, output_dir):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     plot_file = os.path.join(output_dir, f'robomaster_analysis_{timestamp}.png')
     plt.savefig(plot_file, dpi=300, bbox_inches='tight')
-    print(f"📈 Plots saved to: {plot_file}")
+    print(f"Plots saved to: {plot_file}")
     
     plt.show()
 
 def plot_raw_sensor_overview(df, output_dir):
     """Create a dedicated figure for raw sensor data (GPS/IMU/Mag/Baro)"""
-    print("\n📊 Creating Raw Sensor overview plots...")
+    print("\nCreating Raw Sensor overview plots...")
 
     # Ensure relative time exists
     if 'time_rel' not in df.columns and 'timestamp' in df.columns and len(df) > 0:
@@ -421,7 +421,7 @@ def plot_raw_sensor_overview(df, output_dir):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     plot_file = os.path.join(output_dir, f'robomaster_raw_sensors_{timestamp}.png')
     plt.savefig(plot_file, dpi=300, bbox_inches='tight')
-    print(f"📈 Raw sensor plots saved to: {plot_file}")
+    print(f"Raw sensor plots saved to: {plot_file}")
 
     plt.show()
 
@@ -456,7 +456,7 @@ def generate_report(df, pos_stats, vel_stats, theta_stats, bias_stats, output_di
         for key, value in bias_stats.items():
             f.write(f"  {key}: {value:.6f}\n")
     
-    print(f"📄 Report saved to: {report_file}")
+    print(f"Report saved to: {report_file}")
 
 def main():
     parser = argparse.ArgumentParser(description='Analyze RoboMaster EKF log files')
@@ -494,7 +494,7 @@ def main():
                     pass
             plot_raw_sensor_overview(df_raw, args.output)
         except Exception as e:
-            print(f"⚠️ Failed to read raw file: {e}. Falling back to EKF CSV for raw plots.")
+            print(f"Failed to read raw file: {e}. Falling back to EKF CSV for raw plots.")
             plot_raw_sensor_overview(df, args.output)
     else:
         plot_raw_sensor_overview(df, args.output)
@@ -502,8 +502,8 @@ def main():
     # Generate report
     generate_report(df, pos_stats, vel_stats, theta_stats, bias_stats, args.output)
     
-    print(f"\n✅ RoboMaster EKF analysis complete!")
-    print(f"📁 Results saved in: {args.output}/")
+    print(f"\nRoboMaster EKF analysis complete!")
+    print(f"Results saved in: {args.output}/")
 
 if __name__ == "__main__":
     main()
