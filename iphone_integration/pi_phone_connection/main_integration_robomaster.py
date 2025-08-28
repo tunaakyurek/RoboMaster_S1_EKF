@@ -111,6 +111,8 @@ class RoboMasterEKFIntegration:
         self._gps_origin_samples: list[tuple[float, float]] = []
         self._gps_origin_set = False
         self._gps_lpf = None  # low-pass filtered [x,y]
+        # Yaw reference offset (so runs start at theta ≈ 0)
+        self._yaw_offset = 0.0
         
         # Statistics
         self.stats = {
@@ -261,6 +263,28 @@ class RoboMasterEKFIntegration:
             bias_accel_y=bias_accel_y,
             bias_angular_velocity=bias_gyro_z
         )
+        
+        # Determine yaw reference from calibration window
+        try:
+            yaw_samples = [d.yaw for d in self.calibration_data if hasattr(d, 'yaw') and np.isfinite(d.yaw)]
+            yaw_offset_rad = 0.0
+            if len(yaw_samples) >= 10:
+                # Detect unit: degrees vs radians
+                max_abs = max(abs(v) for v in yaw_samples)
+                yaws_rad = np.radians(yaw_samples) if max_abs > 6.283185307179586 else yaw_samples
+                # Circular mean
+                yaw_offset_rad = float(np.arctan2(np.mean(np.sin(yaws_rad)), np.mean(np.cos(yaws_rad))))
+            else:
+                # Fallback to magnetometer average heading
+                avg_mx = float(np.mean([d.mag_x for d in self.calibration_data]))
+                avg_my = float(np.mean([d.mag_y for d in self.calibration_data]))
+                # Basic heading from mag X/Y (convention dependent). We normalize later.
+                yaw_offset_rad = float(np.arctan2(avg_my, avg_mx))
+            self._yaw_offset = self._normalize_angle(yaw_offset_rad)
+            logger.info(f"Yaw reference offset set to {np.degrees(self._yaw_offset):.2f} deg (runs will start near 0°)")
+        except Exception as e:
+            logger.warning(f"Failed to estimate yaw reference offset, defaulting to 0: {e}")
+            self._yaw_offset = 0.0
         
         self.ekf.reset(initial_state)
         self.processor.calibrate(self.calibration_data, len(self.calibration_data) * 0.02)
@@ -527,7 +551,7 @@ class RoboMasterEKFIntegration:
                 try:
                     if 'mag' in processed_data:
                         mag = np.array(processed_data['mag'])
-                        self.ekf.update_magnetometer_yaw(mag)
+                        self._update_with_magnetometer(raw_data, processed_data)
                 except Exception as e:
                     logger.error(f"Magnetometer update failed: {e}")
                 
@@ -649,13 +673,14 @@ class RoboMasterEKFIntegration:
         # Optional velocity from speed/course
         if 'speed' in gps_data and 'course' in gps_data:
             speed = gps_data['speed']
-            course_rad = np.radians(gps_data['course'])
+            course_rad = np.radians(gps_data['course']) if abs(gps_data['course']) > 6.283185307179586 else gps_data['course']
             vx_gps = speed * np.cos(course_rad)
             vy_gps = speed * np.sin(course_rad)
             self.ekf.update_gps_velocity(np.array([vx_gps, vy_gps]))
             if speed > 0.7:
                 yaw_course = course_rad - np.pi/2
-                yaw_course = self._normalize_angle(yaw_course)
+                # Apply yaw reference offset so heading is relative to start
+                yaw_course = self._normalize_angle(yaw_course - self._yaw_offset)
                 self.ekf.update_yaw(yaw_course)
     
     def _update_autonomous_controller(self, state: RoboMasterState):
