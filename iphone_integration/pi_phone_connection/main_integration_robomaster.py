@@ -319,28 +319,30 @@ class RoboMasterEKFIntegration:
         if not self.is_running:
             return
 
+        # Phase 1: Pre-delay (collect data but don't start EKF)
         if self.system_start_time is None:
             self.system_start_time = time.time()
             logger.info(f"First sensor data received. Starting pre-delay of {self.pre_start_delay_seconds}s.")
-            # Do not process data during pre-start delay
+            # During pre-delay, just collect data for calibration
+            self.calibration_data.append(data)
             return
 
         elapsed_since_system_start = time.time() - self.system_start_time
 
         if elapsed_since_system_start < self.pre_start_delay_seconds:
-            # Still in pre-start delay, just log and discard data
-            # logger.debug(f"In pre-start delay ({elapsed_since_system_start:.1f}/{self.pre_start_delay_seconds:.1f}s). Discarding data.")
+            # Still in pre-delay, collect calibration data
+            self.calibration_data.append(data)
+            logger.debug(f"In pre-delay ({elapsed_since_system_start:.1f}/{self.pre_start_delay_seconds:.1f}s). Collecting calibration data.")
             return
 
+        # Phase 2: Calibration (collect data and estimate biases)
         if not self.is_calibrated:
             if self.calibration_start_time is None:
                 # Pre-delay has just finished, start calibration now
                 self.calibration_start_time = time.time()
                 logger.info(f"Pre-delay finished. Starting {self._calibration_duration}s calibration.")
-                logger.info(f"Debug: system_start_time={self.system_start_time}, pre_delay={self.pre_start_delay_seconds}, calib_start={self.calibration_start_time}")
             
             elapsed_since_calibration_start = time.time() - self.calibration_start_time
-            logger.debug(f"Debug: current_time={time.time()}, calib_start={self.calibration_start_time}, elapsed={elapsed_since_calibration_start:.1f}")
             if elapsed_since_calibration_start < self._calibration_duration:
                 self.calibration_data.append(data)
                 logger.debug(f"Collecting calibration data ({len(self.calibration_data)} samples, {elapsed_since_calibration_start:.1f}/{self._calibration_duration:.1f}s)")
@@ -358,7 +360,7 @@ class RoboMasterEKFIntegration:
                     self.stop() # Stop the system if calibration fails
                 return # Calibration just finished, don't process this packet as EKF data yet
 
-        # If calibrated and past pre-delay, proceed with normal EKF processing
+        # Phase 3: EKF Running (normal processing)
         try:
             # Validate sensor data quality before processing
             if not self._validate_sensor_data(data):
@@ -469,17 +471,17 @@ class RoboMasterEKFIntegration:
                         logger.warning(f"Invalid GPS coordinates: {lat}, {lon}")
                         return False
                     
-                    # Check for reasonable speed values
+                    # Check for reasonable speed values (allow negative values as invalid GPS indicators)
                     if 'speed' in gps:
                         speed = gps['speed']
-                        if not np.isfinite(speed) or speed < 0 or speed > 100:  # 0-100 m/s reasonable
+                        if not np.isfinite(speed) or speed > 100:  # Allow negative values, only reject > 100 m/s
                             logger.warning(f"Invalid GPS speed: {speed}")
                             return False
                     
-                    # Check for reasonable course values
+                    # Check for reasonable course values (allow invalid values as indicators)
                     if 'course' in gps:
                         course = gps['course']
-                        if not np.isfinite(course) or not (0 <= course <= 360):
+                        if not np.isfinite(course):  # Only reject non-finite values
                             logger.warning(f"Invalid GPS course: {course}")
                             return False
             
@@ -505,31 +507,41 @@ class RoboMasterEKFIntegration:
                     last_time = current_time
                     continue
 
-                control_input = self._prepare_control_input(raw_data, processed_data)
-                if control_input is None:
-                    # If no control input (e.g., stream pause), keep EKF alive by skipping update
-                    # but do not kill the loop; just continue to wait for next packet.
-                    last_time = current_time
-                    continue
-                
+                # Simple prediction step (like enhanced version)
                 try:
-                    self.ekf.predict(dt, control_input)
+                    self.ekf.predict(dt)
                 except Exception as e:
                     logger.error(f"Prediction failed: {e}")
                     continue
                 
-                # Constraint helpers (do not change EKF internals)
+                # Update with IMU (like enhanced version)
                 try:
-                    self.ekf.update_non_holonomic_constraint()
-                    self.ekf.update_zero_velocity()
-                    self.ekf.update_zero_angular_rate()
+                    if 'accel' in processed_data and 'gyro' in processed_data:
+                        accel = np.array(processed_data['accel'])
+                        gyro = np.array(processed_data['gyro'])
+                        self.ekf.update_imu(accel, gyro)
                 except Exception as e:
-                    logger.error(f"Constraint updates failed: {e}")
+                    logger.error(f"IMU update failed: {e}")
                 
+                # Update with magnetometer (like enhanced version)
+                try:
+                    if 'mag' in processed_data:
+                        mag = np.array(processed_data['mag'])
+                        self.ekf.update_magnetometer_yaw(mag)
+                except Exception as e:
+                    logger.error(f"Magnetometer update failed: {e}")
+                
+                # Update with GPS if available
                 try:
                     self._update_with_gps(raw_data, processed_data)
                 except Exception as e:
                     logger.error(f"GPS update failed: {e}")
+                
+                # Apply constraint updates for robust yaw estimation
+                try:
+                    self.ekf.apply_constraint_updates()
+                except Exception as e:
+                    logger.error(f"Constraint updates failed: {e}")
                 
                 current_state = self.ekf.get_state()
                 if self.autonomous_controller and AUTONOMOUS_AVAILABLE:
@@ -549,7 +561,6 @@ class RoboMasterEKFIntegration:
                     self._print_status(current_state)
             except queue.Empty:
                 # No data available right now (e.g., Siri paused recording). Keep running.
-                # Optionally, we could emit a heartbeat or apply constraint updates without new data.
                 continue
             except Exception as e:
                 logger.error(f"EKF processing error: {e}")
