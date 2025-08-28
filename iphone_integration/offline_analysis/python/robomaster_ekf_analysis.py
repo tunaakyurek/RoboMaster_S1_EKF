@@ -458,11 +458,75 @@ def generate_report(df, pos_stats, vel_stats, theta_stats, bias_stats, output_di
     
     print(f"Report saved to: {report_file}")
 
+def detect_and_filter_phases(df, pre_delay_seconds=5.0, calibration_duration=5.0):
+    """
+    Detect and filter data phases to exclude pre-delay and show only calibration + EKF phases
+    
+    Args:
+        df: DataFrame with RoboMaster data
+        pre_delay_seconds: Duration of pre-delay phase (default 5.0s)
+        calibration_duration: Duration of calibration phase (default 5.0s)
+    
+    Returns:
+        filtered_df: DataFrame with only calibration and EKF phases
+        phase_info: Dictionary with phase timing information
+    """
+    print(f"\nDetecting data phases (pre-delay: {pre_delay_seconds}s, calibration: {calibration_duration}s)")
+    
+    # Detect phases based on EKF state values
+    # Pre-delay: EKF states are all zeros (not yet calibrated)
+    # Calibration: EKF states still zeros but collecting data
+    # Running: EKF states have non-zero values (calibration complete)
+    
+    # Find when EKF starts producing non-zero states (calibration complete)
+    ekf_running_mask = (df['x'] != 0.0) | (df['y'] != 0.0) | (df['vx'] != 0.0) | (df['vy'] != 0.0)
+    
+    if ekf_running_mask.any():
+        # Find first non-zero EKF state
+        first_ekf_idx = ekf_running_mask.idxmax()
+        first_ekf_time = df.loc[first_ekf_idx, 'time_rel']
+        
+        # Calibration phase starts after pre-delay
+        calibration_start_time = pre_delay_seconds
+        calibration_end_time = calibration_start_time + calibration_duration
+        
+        # Filter data: exclude pre-delay, include calibration + EKF phases
+        phase_mask = df['time_rel'] >= calibration_start_time
+        
+        filtered_df = df[phase_mask].copy()
+        
+        # Adjust time to start from calibration phase
+        filtered_df['time_rel'] = filtered_df['time_rel'] - calibration_start_time
+        
+        phase_info = {
+            'pre_delay_duration': pre_delay_seconds,
+            'calibration_start': calibration_start_time,
+            'calibration_end': calibration_end_time,
+            'ekf_start': first_ekf_time,
+            'total_filtered_duration': filtered_df['time_rel'].iloc[-1],
+            'samples_excluded': len(df) - len(filtered_df),
+            'samples_included': len(filtered_df)
+        }
+        
+        print(f"Phase detection complete:")
+        print(f"   Pre-delay: 0.0s - {pre_delay_seconds:.1f}s (excluded)")
+        print(f"   Calibration: {calibration_start_time:.1f}s - {calibration_end_time:.1f}s (included)")
+        print(f"   EKF running: {first_ekf_time:.1f}s - end (included)")
+        print(f"   Data filtered: {phase_info['samples_excluded']} samples excluded, {phase_info['samples_included']} samples included")
+        
+        return filtered_df, phase_info
+        
+    else:
+        print("No EKF state changes detected - using full dataset")
+        return df, {'pre_delay_duration': 0, 'calibration_start': 0, 'calibration_end': 0, 'ekf_start': 0}
+
 def main():
     parser = argparse.ArgumentParser(description='Analyze RoboMaster EKF log files')
     parser.add_argument('--file', required=True, help='Path to RoboMaster EKF CSV log file')
     parser.add_argument('--output', default='analysis_results', help='Output directory for plots and reports')
     parser.add_argument('--raw-file', default=None, help='Optional path to raw sensor CSV file (robomaster_raw_log_*.csv)')
+    parser.add_argument('--pre-delay', type=float, default=5.0, help='Pre-delay duration in seconds (default: 5.0)')
+    parser.add_argument('--calibration-duration', type=float, default=5.0, help='Calibration duration in seconds (default: 5.0)')
     
     args = parser.parse_args()
     
@@ -474,11 +538,14 @@ def main():
     if df is None:
         return
     
-    # Analyze trajectory
-    pos_stats, vel_stats, theta_stats, bias_stats = analyze_robomaster_trajectory(df)
+    # Detect and filter phases
+    df_filtered, phase_info = detect_and_filter_phases(df, args.pre_delay, args.calibration_duration)
     
-    # Create plots
-    plot_robomaster_analysis(df, args.output)
+    # Analyze trajectory using filtered data
+    pos_stats, vel_stats, theta_stats, bias_stats = analyze_robomaster_trajectory(df_filtered)
+    
+    # Create plots using filtered data
+    plot_robomaster_analysis(df_filtered, args.output)
     # Create dedicated raw sensor figure
     if args.raw_file and os.path.exists(args.raw_file):
         try:
@@ -499,8 +566,8 @@ def main():
     else:
         plot_raw_sensor_overview(df, args.output)
     
-    # Generate report
-    generate_report(df, pos_stats, vel_stats, theta_stats, bias_stats, args.output)
+    # Generate report using filtered data and phase info
+    generate_report(df_filtered, pos_stats, vel_stats, theta_stats, bias_stats, args.output)
     
     print(f"\nRoboMaster EKF analysis complete!")
     print(f"Results saved in: {args.output}/")

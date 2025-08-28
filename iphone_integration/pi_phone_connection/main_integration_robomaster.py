@@ -101,7 +101,9 @@ class RoboMasterEKFIntegration:
         self.is_calibrated = False
         self.calibration_data = []
         self.calibration_start_time = None
-        self._calibration_duration = None
+        self._calibration_duration = self.config.get('calibration', {}).get('duration', 5.0)
+        self.pre_start_delay_seconds = self.config.get('calibration', {}).get('pre_start_delay_seconds', 5.0)
+        self.system_start_time = None  # Track when the system truly started processing
         self.first_packet_time = None
         self._phase = 'idle'  # idle | pre_delay | calibrating | running
         # GPS/Stationary helpers
@@ -286,18 +288,16 @@ class RoboMasterEKFIntegration:
         # the socket stays bound and receiver continues buffering/new packets when resumed.
         self.receiver.start(callback=self._sensor_data_callback)
         
-        # Start EKF processing thread
-        self.ekf_thread = threading.Thread(target=self._ekf_processing_loop)
-        self.ekf_thread.daemon = True
-        self.ekf_thread.start()
+        # DO NOT start EKF processing thread immediately - wait for phased startup
+        # The EKF thread will be started after calibration is complete
         
-        # Start logging thread
-        if self.log_file:
+        # Start logging thread for raw data only
+        if self.raw_log_writer:
             self.log_thread = threading.Thread(target=self._logging_loop)
             self.log_thread.daemon = True
             self.log_thread.start()
         
-        logger.info("RoboMaster integration system started")
+        logger.info("RoboMaster integration system started - waiting for first sensor data to begin phased startup")
     
     def stop(self):
         """Stop the integration system"""
@@ -315,10 +315,50 @@ class RoboMasterEKFIntegration:
         logger.info("RoboMaster integration system stopped")
     
     def _sensor_data_callback(self, data: iPhoneSensorData):
-        """Process incoming sensor data with robust error handling"""
+        """Process incoming sensor data with robust error handling and manage phased startup"""
         if not self.is_running:
             return
-        
+
+        if self.system_start_time is None:
+            self.system_start_time = time.time()
+            logger.info(f"First sensor data received. Starting pre-delay of {self.pre_start_delay_seconds}s.")
+            # Do not process data during pre-start delay
+            return
+
+        elapsed_since_system_start = time.time() - self.system_start_time
+
+        if elapsed_since_system_start < self.pre_start_delay_seconds:
+            # Still in pre-start delay, just log and discard data
+            # logger.debug(f"In pre-start delay ({elapsed_since_system_start:.1f}/{self.pre_start_delay_seconds:.1f}s). Discarding data.")
+            return
+
+        if not self.is_calibrated:
+            if self.calibration_start_time is None:
+                # Pre-delay has just finished, start calibration now
+                self.calibration_start_time = time.time()
+                logger.info(f"Pre-delay finished. Starting {self._calibration_duration}s calibration.")
+                logger.info(f"Debug: system_start_time={self.system_start_time}, pre_delay={self.pre_start_delay_seconds}, calib_start={self.calibration_start_time}")
+            
+            elapsed_since_calibration_start = time.time() - self.calibration_start_time
+            logger.debug(f"Debug: current_time={time.time()}, calib_start={self.calibration_start_time}, elapsed={elapsed_since_calibration_start:.1f}")
+            if elapsed_since_calibration_start < self._calibration_duration:
+                self.calibration_data.append(data)
+                logger.debug(f"Collecting calibration data ({len(self.calibration_data)} samples, {elapsed_since_calibration_start:.1f}/{self._calibration_duration:.1f}s)")
+                return # Do not process EKF data during calibration
+            else:
+                # Calibration duration met, process data and set calibrated
+                logger.info(f"Calibration duration met. Processing {len(self.calibration_data)} samples.")
+                try:
+                    self._process_calibration_data()
+                    self.is_calibrated = True
+                    logger.info("✅ Calibration complete - biases estimated. Starting EKF processing.")
+                    self._start_ekf_and_logging() # Start EKF and logging threads
+                except RuntimeError as e:
+                    logger.error(f"Calibration failed: {e}. System will not start EKF.")
+                    self.stop() # Stop the system if calibration fails
+                return # Calibration just finished, don't process this packet as EKF data yet
+
+        # If calibrated and past pre-delay, proceed with normal EKF processing
         try:
             # Validate sensor data quality before processing
             if not self._validate_sensor_data(data):
@@ -346,6 +386,21 @@ class RoboMasterEKFIntegration:
             self.stats['packets_processed'] += 1
         else:
             logger.warning("State queue full, dropping data")
+
+    def _start_ekf_and_logging(self):
+        """Start EKF processing and logging threads after calibration is complete"""
+        # Start EKF processing thread
+        self.ekf_thread = threading.Thread(target=self._ekf_processing_loop)
+        self.ekf_thread.daemon = True
+        self.ekf_thread.start()
+        
+        # Start EKF logging thread if not already started
+        if self.log_file and not hasattr(self, 'ekf_log_thread'):
+            self.ekf_log_thread = threading.Thread(target=self._ekf_logging_loop)
+            self.ekf_log_thread.daemon = True
+            self.ekf_log_thread.start()
+        
+        logger.info("EKF processing and logging threads started")
     
     def _validate_sensor_data(self, data: iPhoneSensorData) -> bool:
         """Validate raw sensor data quality"""
@@ -444,36 +499,9 @@ class RoboMasterEKFIntegration:
                 current_time = time.time()
                 dt = current_time - last_time
                 
-                # Phased startup handling
+                # Only process EKF data if calibration is complete
                 if not self.is_calibrated:
-                    now = time.time()
-                    calib_cfg = self.config.get('calibration', {})
-                    pre_delay = float(calib_cfg.get('pre_start_delay_seconds', 5.0))
-                    calib_duration = float(calib_cfg.get('duration', 5.0))
-
-                    if self.first_packet_time is None:
-                        self.first_packet_time = now
-                        self._phase = 'pre_delay'
-                        logger.info(f"Pre-calibration delay started ({pre_delay:.1f}s). Place rover at initial pose.")
-                    elif self._phase == 'pre_delay' and (now - self.first_packet_time) >= pre_delay:
-                        self._phase = 'calibrating'
-                        self.calibration_data = []
-                        self.calibration_start_time = now
-                        self._calibration_duration = calib_duration
-                        logger.info(f"Calibration started for {calib_duration:.1f}s. Keep device stationary.")
-                    elif self._phase == 'calibrating':
-                        self.calibration_data.append(raw_data)
-                        if (now - (self.calibration_start_time or now)) >= calib_duration:
-                            try:
-                                self._process_calibration_data()
-                                self.is_calibrated = True
-                                self._phase = 'running'
-                                logger.info("Calibration complete. EKF is now running.")
-                            except Exception as e:
-                                logger.error(f"Calibration failed: {e}")
-                                self.is_calibrated = True
-                                self._phase = 'running'
-
+                    logger.debug("EKF not yet calibrated, skipping data")
                     last_time = current_time
                     continue
 
@@ -667,7 +695,22 @@ class RoboMasterEKFIntegration:
             self.raw_log_file = None
     
     def _logging_loop(self):
-        """Background logging loop"""
+        """Background logging loop for raw sensor data only"""
+        log_rate = self.config.get('logging', {}).get('rate', 50)
+        log_interval = 1.0 / log_rate
+        last_log_time = 0
+        while self.is_running and self.raw_log_writer:
+            current_time = time.time()
+            if current_time - last_log_time >= log_interval:
+                try:
+                    self._write_raw_log_entry()
+                    last_log_time = current_time
+                except Exception as e:
+                    logger.error(f"Raw logging error: {e}")
+            time.sleep(0.001)
+
+    def _ekf_logging_loop(self):
+        """Background logging loop for EKF state data"""
         log_rate = self.config.get('logging', {}).get('rate', 50)
         log_interval = 1.0 / log_rate
         last_log_time = 0
@@ -676,10 +719,9 @@ class RoboMasterEKFIntegration:
             if current_time - last_log_time >= log_interval:
                 try:
                     self._write_log_entry()
-                    self._write_raw_log_entry()
                     last_log_time = current_time
                 except Exception as e:
-                    logger.error(f"Logging error: {e}")
+                    logger.error(f"EKF logging error: {e}")
             time.sleep(0.001)
     
     def _write_log_entry(self):
