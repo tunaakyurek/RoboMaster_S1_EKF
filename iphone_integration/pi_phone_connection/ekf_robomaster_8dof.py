@@ -110,11 +110,11 @@ class RoboMasterEKF8DOF:
         
         # Initial state covariance P (following formulary)
         self.P = np.eye(self.n_states)
-        self.P[0:2, 0:2] *= config.get('init_pos_var', 1.0)      # Position uncertainty
-        self.P[2, 2] = config.get('init_theta_var', 0.1)         # Orientation uncertainty  
-        self.P[3:5, 3:5] *= config.get('init_vel_var', 0.5)     # Velocity uncertainty
-        self.P[5:7, 5:7] *= config.get('init_accel_bias_var', 0.01)  # Accel bias uncertainty
-        self.P[7, 7] = config.get('init_gyro_bias_var', 0.01)   # Gyro bias uncertainty - increased for better observability
+        self.P[0:2, 0:2] *= config.get('init_pos_var', 0.5)      # Reduced from 1.0 - start with less position uncertainty
+        self.P[2, 2] = config.get('init_theta_var', 0.05)         # Reduced from 0.1 - start with less orientation uncertainty  
+        self.P[3:5, 3:5] *= config.get('init_vel_var', 0.2)      # Reduced from 0.5 - start with less velocity uncertainty
+        self.P[5:7, 5:7] *= config.get('init_accel_bias_var', 0.005)  # Reduced from 0.01 - start with less accel bias uncertainty
+        self.P[7, 7] = config.get('init_gyro_bias_var', 0.005)   # Reduced from 0.01 - start with less gyro bias uncertainty
         
         # Continuous-time process noise PSD parameters (following formulary)
         # q_accel: white acceleration PSD (per axis) [m^2/s^3]

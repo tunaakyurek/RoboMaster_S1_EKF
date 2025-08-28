@@ -50,21 +50,15 @@ ekf.predict(dt, control_input)
 ekf.update_gps_position(gps_pos)
 ekf.update_gps_velocity(gps_vel)
 
-# Magnetometer updates
+# Magnetometer updates (if available)
 ekf.update_magnetometer_yaw(mag_vector)
 
-# Apply all constraints automatically
+# Apply constraint helpers (NHC, ZUPT, ZARU, GPS-course)
 ekf.apply_constraint_updates()
 ```
 
 ### 3. Integration in Main Loop
-```python
-# After GPS updates
-self.ekf.apply_constraint_updates()
-
-# In main processing loop
-self.ekf.apply_constraint_updates()
-```
+Call `apply_constraint_updates()` after prediction and after GPS/magnetometer updates as needed.
 
 ## 📊 Test Results
 
@@ -86,12 +80,12 @@ python demo_realistic_yaw_fix.py
 - **Drift reduction**: 17.3x better
 - **Final yaw drift**: From ~20° to ~1°
 
-## 📁 Files Modified
+## 📁 Files
 
-- **`ekf_robomaster_8dof.py`**: Core EKF with all fixes
-- **`main_integration_enhanced.py`**: Updated integration
-- **`YAW_OBSERVABILITY_FIXES.md`**: Technical details
-- **`IMPLEMENTATION_SUMMARY.md`**: Complete summary
+- **`pi_phone_connection/ekf_robomaster_8dof.py`**: Core EKF with all fixes
+- **`pi_phone_connection/main_integration_robomaster.py`**: Integration runner
+- **`iphone_integration/YAW_OBSERVABILITY_FIXES.md`**: Technical details
+- **`iphone_integration/IMPLEMENTATION_SUMMARY.md`**: Summary
 
 ## 🎯 Key Methods Added
 

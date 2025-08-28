@@ -217,31 +217,13 @@ def _rotation_matrix_ned_to_body(self, roll, pitch, yaw):
 
 ## Platform-Specific Adaptations
 
-### 1. Raspberry Pi Implementation (`src/ekf/ekf_core.py`)
+### 1. Raspberry Pi Main EKF (`src/ekf/ekf_core.py`)
 
-**Formulary Compliance**: ✅ FULL COMPLIANCE
-- Uses NumPy for efficient matrix operations
-- Full 12D state vector
-- Complete sensor fusion (IMU, GPS, Baro, Mag)
-- 50 Hz update rate
-- All mathematical expressions match formulary exactly
+Implements a 12D EKF skeleton with IMU, chassis, GPS, and magnetometer hooks. Used by `src/main.py` integration path.
 
-### 2. S1 Lab Implementation (`ekf_formulary_compliant_s1.py`)
+### 2. iPhone Integration EKF (`iphone_integration/pi_phone_connection/ekf_robomaster_8dof.py`)
 
-**Formulary Compliance**: ✅ FULL COMPLIANCE (Adapted)
-- Custom matrix class for hardware constraints
-- Full 12D state vector (same as formulary)
-- Reduced update rate (5 Hz) due to hardware limitations
-- All mathematical expressions match formulary exactly
-- Adapted for limited sensor availability
-
-### 3. Simplified S1 Implementation (`ekf_complete_s1_FIXED.py`)
-
-**Formulary Compliance**: ⚠️ PARTIAL COMPLIANCE
-- Uses 6D state vector (reduced for performance)
-- Simplified sensor fusion
-- Adapted for extreme hardware constraints
-- Core mathematical principles preserved
+Implements an 8-DOF planar EKF specialized for ground vehicles with yaw-observability fixes (GPS-course yaw, magnetometer yaw, NHC, ZUPT, ZARU). Used by `iphone_integration/pi_phone_connection/main_integration_robomaster.py`.
 
 ## Sensor Fusion Strategy
 
@@ -256,26 +238,7 @@ The EKF relies **solely on sensor measurements** as specified in the formulary:
 5. **Barometer** (when available): Altitude estimation
 
 ### Implementation Compliance
-
-```python
-def process_sensor_data(self, sensor_data):
-    """
-    Process all available sensor data as per formulary
-    Follows the sensor fusion strategy outlined in the formulary
-    """
-    # Update with available sensors as per formulary
-    if sensor_data.accel is not None and sensor_data.gyro is not None:
-        self.update_imu(sensor_data.accel, sensor_data.gyro)
-    
-    if sensor_data.mag is not None:
-        self.update_magnetometer(sensor_data.mag)
-    
-    if all(x is not None for x in [sensor_data.gps_lat, sensor_data.gps_lon, sensor_data.gps_alt]):
-        self.update_gps(sensor_data.gps_lat, sensor_data.gps_lon, sensor_data.gps_alt)
-    
-    if all(x is not None for x in [sensor_data.chassis_x, sensor_data.chassis_y, sensor_data.chassis_yaw]):
-        self.update_chassis(sensor_data.chassis_x, sensor_data.chassis_y, sensor_data.chassis_yaw)
-```
+In `src/ekf/ekf_core.py`, `process_sensor_data` follows the formulary update order. In the iPhone EKF, IMU drives prediction; absolute heading and constraint updates enforce yaw observability.
 
 ## Noise Parameters
 
@@ -352,9 +315,8 @@ def _normalize_angles(self, angles):
 - [x] Barometer integration (when available)
 
 ### ✅ Platform Adaptations
-- [x] Raspberry Pi: Full formulary compliance
-- [x] S1 Lab: Full formulary compliance (adapted)
-- [x] Simplified S1: Partial compliance (hardware constraints)
+- [x] Raspberry Pi: 12D EKF skeleton with formulary math
+- [x] iPhone Integration: 8-DOF EKF with observability fixes
 
 ### ✅ Performance Characteristics
 - [x] Update rates appropriate for platform

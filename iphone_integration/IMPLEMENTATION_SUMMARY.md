@@ -70,31 +70,20 @@ The EKF measurement model **lacked yaw observability**:
 ## 🚀 Integration Changes
 
 ### Main Integration Loop
-```python
-# After GPS updates
-self.ekf.apply_constraint_updates()
+Use `apply_constraint_updates()` after prediction and as needed alongside GPS or magnetometer updates.
 
-# In EKF processing loop  
+### GPS Update Handler (example)
+```python
+self.ekf.update_gps_position(gps_pos)
+self.ekf.update_gps_velocity(gps_vel)
 self.ekf.apply_constraint_updates()
 ```
 
-### GPS Update Handler
+### Magnetometer Integration (example)
 ```python
-def _handle_gps_update(self, gps_data):
-    # Update position and velocity
-    self.ekf.update_gps_position(gps_pos)
-    self.ekf.update_gps_velocity(gps_vel)
-    
-    # Apply all constraint updates
-    self.ekf.apply_constraint_updates()
-```
-
-### Magnetometer Integration
-```python
-def _update_with_magnetometer(self, raw_data, processed_data):
-    if 'mag' in processed_data:
-        mag = np.array(processed_data['mag'])
-        self.ekf.update_magnetometer_yaw(mag)
+if 'mag' in processed_data:
+    mag = np.array(processed_data['mag'])
+    self.ekf.update_magnetometer_yaw(mag)
 ```
 
 ## 🧪 Testing and Validation
@@ -114,10 +103,10 @@ def _update_with_magnetometer(self, raw_data, processed_data):
 ## 📁 Files Modified
 
 ### Core EKF Implementation
-- **`ekf_robomaster_8dof.py`**: Added all new methods and improvements
+- **`pi_phone_connection/ekf_robomaster_8dof.py`**: Contains all methods and improvements
 
 ### Main Integration
-- **`main_integration_enhanced.py`**: Updated to use new EKF methods
+- **`pi_phone_connection/main_integration_robomaster.py`**: Integration runner using the new EKF methods
 
 ### Documentation
 - **`YAW_OBSERVABILITY_FIXES.md`**: Comprehensive technical explanation

@@ -113,7 +113,7 @@ class iPhoneDataReceiver:
     Supports multiple connection methods: WebSocket, UDP, TCP
     """
     
-    def __init__(self, connection_type: str = 'udp', port: int = 5555):
+    def __init__(self, connection_type: str = 'udp', port: int = 5555, host: str = ''):
         """
         Initialize iPhone data receiver
         
@@ -123,6 +123,7 @@ class iPhoneDataReceiver:
         """
         self.connection_type = connection_type
         self.port = port
+        self.host = host  # bind host, '' or '0.0.0.0' to listen on all
         self.is_running = False
         self.data_queue = queue.Queue(maxsize=100)
         self.latest_data = None
@@ -180,10 +181,16 @@ class iPhoneDataReceiver:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         # Increase buffer size to handle larger packets
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
-        sock.bind(('', self.port))
+        try:
+            sock.bind((self.host or '', self.port))
+        except Exception as e:
+            logger.error(f"Failed to bind UDP socket on {self.host or '0.0.0.0'}:{self.port}: {e}")
+            self.is_running = False
+            sock.close()
+            return
         sock.settimeout(1.0)  # 1 second timeout for checking stop flag
         
-        logger.info(f"UDP receiver listening on port {self.port}")
+        logger.info(f"UDP receiver listening on {self.host or '0.0.0.0'}:{self.port}")
         
         while self.is_running:
             try:
@@ -201,11 +208,17 @@ class iPhoneDataReceiver:
         """TCP receiver thread"""
         server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_sock.bind(('', self.port))
+        try:
+            server_sock.bind((self.host or '', self.port))
+        except Exception as e:
+            logger.error(f"Failed to bind TCP socket on {self.host or '0.0.0.0'}:{self.port}: {e}")
+            self.is_running = False
+            server_sock.close()
+            return
         server_sock.listen(1)
         server_sock.settimeout(1.0)
         
-        logger.info(f"TCP receiver listening on port {self.port}")
+        logger.info(f"TCP receiver listening on {self.host or '0.0.0.0'}:{self.port}")
         
         while self.is_running:
             try:

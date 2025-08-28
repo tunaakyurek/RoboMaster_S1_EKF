@@ -6,7 +6,7 @@ This document summarizes the changes made to integrate the RoboMaster EKF Formul
 
 ## Changes Made
 
-### 1. **Updated Main EKF Implementation** (`src/ekf/ekf_core.py`)
+### 1. **Main EKF Implementation (Raspberry Pi path)** (`src/ekf/ekf_core.py`)
 
 **Changes Applied**:
 - ✅ Added comprehensive formulary compliance documentation
@@ -30,52 +30,13 @@ Reference: RoboMaster EKF Formulary v1.0
 """
 ```
 
-### 2. **Created New Formulary-Compliant S1 Implementation** (`ekf_formulary_compliant_s1.py`)
+### 2. **iPhone Integration EKF (8-DOF)** (`iphone_integration/pi_phone_connection/ekf_robomaster_8dof.py`)
 
-**New Features**:
-- ✅ Full 12D state vector as per formulary
-- ✅ Custom matrix class for S1 hardware constraints
-- ✅ Complete mathematical expression compliance
-- ✅ Proper coordinate frame implementation (NED)
-- ✅ All formulary equations implemented correctly
+Implements a ground-vehicle 8-DOF EKF with yaw observability fixes (GPS-course yaw, magnetometer yaw, NHC, ZUPT, ZARU). Used by `iphone_integration/pi_phone_connection/main_integration_robomaster.py`.
 
-**Key Characteristics**:
-- **State Vector**: `[x, y, z, vx, vy, vz, roll, pitch, yaw, wx, wy, wz]` (12D)
-- **Coordinate Frame**: NED (North-East-Down)
-- **Update Rate**: 5 Hz (adapted for S1 hardware)
-- **Mathematical Compliance**: 100% formulary compliant
-
-### 3. **Updated Existing S1 Implementation** (`ekf_complete_s1_FIXED.py`)
-
-**Changes Applied**:
-- ✅ Added formulary compliance documentation
-- ✅ Updated mathematical expressions to reference formulary
-- ✅ Enhanced coordinate frame documentation
-- ✅ Improved parameter documentation
-- ✅ Added formulary compliance verification
-
-**Key Updates**:
-```python
-# State Vector: [x, y, z, vx, vy, vz, roll, pitch, yaw, wx, wy, wz] (12D)
-# Coordinate Frame: NED (North-East-Down) as per formulary
-
-# Filter parameters as per formulary
-ACCEL_TRUST = 0.15
-GYRO_TRUST = 0.85
-CHASSIS_TRUST = 0.95
-
-# Process noise as per formulary
-Q_POSITION = 0.01
-Q_ANGLE = 0.05
-
-# Measurement noise as per formulary
-R_ACCEL = 0.5
-R_GYRO = 0.1
-R_CHASSIS = 0.05
-
-# Physical constants as per formulary
-GRAVITY = 9.81  # m/s²
-```
+### 3. **Ground Station and Main Integration**
+- Raspberry Pi path: `src/main.py` integrates `src/ekf/ekf_core.py` with RoboMaster sensors and `src/ground_station.py`
+- iPhone path: `iphone_integration/pi_phone_connection/main_integration_robomaster.py` integrates the 8-DOF EKF with iPhone sensors
 
 ### 4. **Created Comprehensive Documentation** (`FORMULARY_COMPLIANCE.md`)
 
@@ -124,54 +85,24 @@ P = (I - K * H) * P * (I - K * H)^T + K * R * K^T (covariance update)
 ## Platform-Specific Adaptations
 
 ### 1. **Raspberry Pi Implementation** (`src/ekf/ekf_core.py`)
-- ✅ **Full Formulary Compliance**
 - ✅ Uses NumPy for efficient matrix operations
-- ✅ 50 Hz update rate
-- ✅ Complete sensor fusion
-- ✅ All mathematical expressions match formulary exactly
+- ✅ ~50 Hz update rate
+- ✅ Sensor fusion hooks (IMU, chassis, GPS, magnetometer)
+- ✅ Formulary-aligned math and state definitions
 
-### 2. **New S1 Lab Implementation** (`ekf_formulary_compliant_s1.py`)
-- ✅ **Full Formulary Compliance** (Adapted)
-- ✅ Custom matrix class for hardware constraints
-- ✅ 5 Hz update rate (hardware limited)
-- ✅ All mathematical expressions match formulary exactly
-- ✅ Adapted for limited sensor availability
-
-### 3. **Updated S1 Lab Implementation** (`ekf_complete_s1_FIXED.py`)
-- ✅ **Partial Formulary Compliance** (Hardware Constrained)
-- ✅ Uses 6D state vector (simplified for performance)
-- ✅ Simplified sensor fusion
-- ✅ Core mathematical principles preserved
-- ✅ Adapted for extreme hardware constraints
+### 2. **iPhone EKF (8-DOF)** (`iphone_integration/pi_phone_connection/ekf_robomaster_8dof.py`)
+- ✅ Observability-enhanced yaw estimation (GPS course, magnetometer, constraints)
+- ✅ Ground-vehicle planar model (8 states)
 
 ## Sensor Fusion Strategy
 
 ### ✅ Formulary Compliance
-All implementations follow the formulary specification of relying **solely on sensor measurements**:
-
-1. **IMU (Accelerometer + Gyroscope)**: Primary orientation and motion estimation
-2. **Chassis Encoders**: Position and velocity validation
-3. **GPS** (when available): Absolute position reference
-4. **Magnetometer** (when available): Absolute heading reference
-5. **Barometer** (when available): Altitude estimation
+Implementations follow the formulary specification of relying **solely on sensor measurements** and constraints for observability. The iPhone EKF uses IMU in prediction and applies absolute-heading/constraint updates to ensure yaw observability.
 
 ## Noise Parameters
 
 ### ✅ Formulary Compliance
-All implementations use the same noise parameters as specified in the formulary:
-
-```python
-# Process Noise Covariance Q as per Formulary
-Q_POSITION = 0.01    # Position uncertainty
-Q_VELOCITY = 0.1     # Velocity uncertainty  
-Q_ORIENTATION = 0.05 # Orientation uncertainty
-Q_ANGULAR_VEL = 0.1  # Angular velocity uncertainty
-
-# Measurement Noise Covariance R as per Formulary
-R_ACCEL = 0.5        # Accelerometer noise
-R_GYRO = 0.1         # Gyroscope noise
-R_CHASSIS = 0.05     # Chassis encoder noise
-```
+The Raspberry Pi EKF uses formulary-aligned defaults; the iPhone EKF exposes tuned parameters via `ekf_config` (process PSDs and measurement covariances) in `system_config.json`.
 
 ## Physical Constants
 
@@ -187,8 +118,8 @@ MAG_DECLINATION = 0.0  # Magnetic declination (to be calibrated)
 ## Verification Results
 
 ### ✅ Mathematical Expressions
-- [x] State vector definition matches formulary
-- [x] Coordinate frame (NED) implementation
+- [x] State vector definition matches formulary (12D path) and documented 8-DOF variant
+- [x] Coordinate frame (NED) implementation in 12D path
 - [x] Prediction step equations
 - [x] State transition matrix
 - [x] IMU measurement model
@@ -199,74 +130,48 @@ MAG_DECLINATION = 0.0  # Magnetic declination (to be calibrated)
 
 ### ✅ Sensor Fusion
 - [x] IMU integration (accelerometer + gyroscope)
-- [x] Chassis encoder integration
+- [x] Chassis encoder integration (Pi path)
 - [x] GPS integration (when available)
 - [x] Magnetometer integration (when available)
-- [x] Barometer integration (when available)
+- [x] Constraint updates for yaw observability (iPhone path)
 
 ### ✅ Platform Adaptations
-- [x] Raspberry Pi: Full formulary compliance
-- [x] S1 Lab: Full formulary compliance (adapted)
-- [x] Simplified S1: Partial compliance (hardware constraints)
+- [x] Raspberry Pi: 12D EKF skeleton with formulary math
+- [x] iPhone Integration: 8-DOF EKF with observability fixes
 
 ## Files Created/Updated
 
-### New Files
-1. **`ekf_formulary_compliant_s1.py`**: New S1 implementation with full formulary compliance
-2. **`FORMULARY_COMPLIANCE.md`**: Comprehensive compliance documentation
-3. **`FORMULARY_INTEGRATION_SUMMARY.md`**: This summary document
-
-### Updated Files
-1. **`src/ekf/ekf_core.py`**: Enhanced with formulary compliance documentation
-2. **`ekf_complete_s1_FIXED.py`**: Updated with formulary references and documentation
+### New/Updated Files
+1. **`iphone_integration/pi_phone_connection/ekf_robomaster_8dof.py`**: 8-DOF EKF with observability fixes
+2. **`FORMULARY_COMPLIANCE.md`**: Comprehensive compliance documentation (updated)
+3. **`FORMULARY_INTEGRATION_SUMMARY.md`**: This summary document (updated)
 
 ## Usage Instructions
 
-### For Raspberry Pi (Full Compliance)
+### For Raspberry Pi (12D EKF path)
 ```bash
 python src/main.py
 ```
 
-### For S1 Lab (Full Compliance - New)
-```python
-# Copy and paste ekf_formulary_compliant_s1.py into RoboMaster Lab
-```
-
-### For S1 Lab (Partial Compliance - Updated)
-```python
-# Copy and paste ekf_complete_s1_FIXED.py into RoboMaster Lab
+### For iPhone Integration (8-DOF)
+```bash
+python iphone_integration/pi_phone_connection/main_integration_robomaster.py
 ```
 
 ## Conclusion
 
-The integration of the RoboMaster EKF Formulary has been **successfully completed** with the following achievements:
+The integration of the RoboMaster EKF Formulary has been completed with:
 
-### ✅ **Full Mathematical Compliance**
-- All mathematical expressions match the formulary exactly
-- Proper coordinate frame implementation (NED)
-- Correct state vector definitions
-- Accurate sensor fusion strategies
+### ✅ **Mathematical Alignment**
+- Formulary-aligned math in the 12D EKF path
+- 8-DOF EKF tailored for planar ground motion with explicit yaw observability fixes
 
 ### ✅ **Platform Optimization**
-- Raspberry Pi: Full formulary compliance with optimal performance
-- S1 Lab: Full formulary compliance adapted for hardware constraints
-- Simplified S1: Partial compliance for extreme hardware limitations
+- Raspberry Pi: 12D EKF skeleton with sensor fusion and visualization pipeline
+- iPhone: 8-DOF EKF with tuned constraints and heading updates
 
-### ✅ **Documentation Excellence**
-- Comprehensive compliance documentation
-- Detailed mathematical expression explanations
-- Platform-specific adaptation guides
-- Verification checklists
+### ✅ **Documentation**
+- Compliance and integration docs aligned with current modules and entry points
+- Clear usage instructions for both paths
 
-### ✅ **Code Quality**
-- Enhanced documentation and comments
-- Proper formulary references throughout
-- Consistent mathematical notation
-- Improved maintainability
-
-**Formulary Integration Status**: ✅ **COMPLETE**  
-**Mathematical Accuracy**: ✅ **VERIFIED**  
-**Platform Compatibility**: ✅ **VERIFIED**  
-**Documentation Quality**: ✅ **EXCELLENT**
-
-The codebase now provides a complete, formulary-compliant EKF implementation that maintains mathematical correctness while being optimized for different hardware platforms and use cases.
+The codebase now provides consistent, formulary-aligned EKF implementations suitable for both Raspberry Pi and iPhone-driven setups.

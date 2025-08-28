@@ -63,7 +63,8 @@ class RoboMasterEKFIntegration:
         # Initialize sensor components
         self.receiver = iPhoneDataReceiver(
             connection_type=self.config.get('connection_type', 'udp'),
-            port=self.config.get('port', 5555)
+            port=self.config.get('port', 5555),
+            host=self.config.get('listen_host', '0.0.0.0')
         )
         
         self.processor = iPhoneDataProcessor()
@@ -112,7 +113,8 @@ class RoboMasterEKFIntegration:
             'ekf_updates': 0,
             'packets_processed': 0,
             'start_time': None,
-            'last_update_time': None
+            'last_update_time': None,
+            'last_packet_age_s': None
         }
         
         # GPS reference for coordinate conversion
@@ -130,26 +132,26 @@ class RoboMasterEKFIntegration:
             'connection_type': 'udp',
             'port': 5555,
             'ekf_config': {
-                # Process noise (from formulary) - aligned with EKF core
-                'q_accel': 0.5,        # White acceleration PSD [m²/s³] - reasonable for IMU
-                'q_gyro': 0.01,        # White gyro noise PSD [rad²/s³] - reasonable for gyro
-                'q_accel_bias': 1e-6,  # Accel bias random walk PSD [(m/s²)²/s]
-                'q_gyro_bias': 1e-5,   # Gyro bias random walk PSD [(rad/s)²/s] - increased for observability
-                # Measurement noise
-                'r_accel': 0.1,
-                'r_gyro': 0.01,
-                'r_gps_pos': 1.0,
-                'r_gps_vel': 0.5,
-                'r_yaw': 0.5,
-                'r_nhc': 0.1,
-                'r_zupt': 0.01,
-                'r_zaru': 0.001,
-                # Initial uncertainties
-                'init_pos_var': 1.0,
-                'init_theta_var': 0.1,
-                'init_vel_var': 0.5,
-                'init_accel_bias_var': 0.01,
-                'init_gyro_bias_var': 0.01
+                # Process noise (from formulary) - adjusted for better motion detection
+                'q_accel': 0.1,        # Reduced from 0.5 - less conservative acceleration modeling
+                'q_gyro': 0.005,       # Reduced from 0.01 - less conservative gyro modeling
+                'q_accel_bias': 1e-5,  # Increased from 1e-6 - allow bias to adapt faster
+                'q_gyro_bias': 1e-4,   # Increased from 1e-5 - allow gyro bias to adapt faster
+                # Measurement noise - reduced for more responsive updates
+                'r_accel': 0.05,       # Reduced from 0.1 - trust accelerometer more
+                'r_gyro': 0.005,       # Reduced from 0.01 - trust gyroscope more
+                'r_gps_pos': 0.5,      # Reduced from 1.0 - trust GPS position more
+                'r_gps_vel': 0.2,      # Reduced from 0.5 - trust GPS velocity more
+                'r_yaw': 0.2,          # Reduced from 0.5 - trust yaw measurements more
+                'r_nhc': 0.05,         # Reduced from 0.1 - trust non-holonomic constraints more
+                'r_zupt': 0.005,       # Reduced from 0.01 - trust zero-velocity updates more
+                'r_zaru': 0.0005,      # Reduced from 0.001 - trust zero-angular-rate updates more
+                # Initial uncertainties - reduced for faster convergence
+                'init_pos_var': 0.5,   # Reduced from 1.0 - start with less uncertainty
+                'init_theta_var': 0.05, # Reduced from 0.1 - start with less orientation uncertainty
+                'init_vel_var': 0.2,   # Reduced from 0.5 - start with less velocity uncertainty
+                'init_accel_bias_var': 0.005, # Reduced from 0.01 - start with less bias uncertainty
+                'init_gyro_bias_var': 0.005   # Reduced from 0.01 - start with less bias uncertainty
             },
             'calibration': {
                 'duration': 5.0,
@@ -274,7 +276,8 @@ class RoboMasterEKFIntegration:
             self._create_log_file()
             self._create_raw_log_file()
         
-        # Start receiver
+        # Start receiver (always-on listener). If stream pauses (e.g., Siri Stop Recording),
+        # the socket stays bound and receiver continues buffering/new packets when resumed.
         self.receiver.start(callback=self._sensor_data_callback)
         
         # Start EKF processing thread
@@ -437,7 +440,9 @@ class RoboMasterEKFIntegration:
                 
                 control_input = self._prepare_control_input(raw_data, processed_data)
                 if control_input is None:
-                    logger.warning("Skipping EKF update due to invalid control input.")
+                    # If no control input (e.g., stream pause), keep EKF alive by skipping update
+                    # but do not kill the loop; just continue to wait for next packet.
+                    last_time = current_time
                     continue
                 
                 try:
@@ -467,11 +472,17 @@ class RoboMasterEKFIntegration:
                 
                 self.stats['ekf_updates'] += 1
                 self.stats['last_update_time'] = current_time
+                if self.receiver:
+                    latest = self.receiver.get_latest_data()
+                    if latest:
+                        self.stats['last_packet_age_s'] = max(0.0, current_time - latest.timestamp)
                 last_time = current_time
                 
                 if self.stats['ekf_updates'] % 100 == 0:
                     self._print_status(current_state)
             except queue.Empty:
+                # No data available right now (e.g., Siri paused recording). Keep running.
+                # Optionally, we could emit a heartbeat or apply constraint updates without new data.
                 continue
             except Exception as e:
                 logger.error(f"EKF processing error: {e}")

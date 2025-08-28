@@ -2,27 +2,26 @@
 
 ## Overview
 
-This subsystem integrates iPhone sensor data with an 8-DOF Extended Kalman Filter (EKF) for autonomous navigation of the RoboMaster S1. The system follows the mathematical specifications from the **RoboMaster EKF Formulary** document.
+This subsystem integrates iPhone sensor data with an 8-DOF Extended Kalman Filter (EKF) for RoboMaster S1. It uses `pi_phone_connection/ekf_robomaster_8dof.py` and the main runner `pi_phone_connection/main_integration_robomaster.py`.
 
 ## System Architecture
 
 ```
-iPhone (Sensors) → Raspberry Pi (EKF Processing) → RoboMaster S1 (Control)
+iPhone (Sensors) → Raspberry Pi (EKF Processing + Logging)
                            ↓
-                    Offline Analysis
-                    (MATLAB/Python)
+                    Offline Analysis (MATLAB/Python)
 ```
 
 ## Features
 
 ### 8-DOF EKF Implementation
-- **State Vector**: `[x, y, z, vz, roll, pitch, yaw, yaw_rate]`
-- **Coordinate Frame**: NED (North-East-Down)
-- **Update Rate**: 50 Hz on Raspberry Pi
-- **Sensor Fusion**: IMU, GPS, Magnetometer, Barometer support
+- **State Vector**: `[x, y, theta, vx, vy, bias_accel_x, bias_accel_y, bias_angular_velocity]`
+- **Coordinate Frame**: Planar XY + yaw (theta)
+- **Update Rate**: ~50 Hz processing
+- **Sensor Fusion**: iPhone IMU + optional GPS/Magnetometer; constraints (NHC, ZUPT, ZARU)
 
 ### iPhone Sensor Integration
-- Real-time sensor data streaming via UDP/TCP
+- Real-time sensor data streaming via UDP (default)
 - Automatic calibration and bias compensation
 - Support for all iPhone motion sensors:
   - Accelerometer (3-axis)
@@ -31,12 +30,8 @@ iPhone (Sensors) → Raspberry Pi (EKF Processing) → RoboMaster S1 (Control)
   - GPS (when available)
   - Barometer
 
-### Autonomous Control
-- Waypoint navigation
-- Path following
-- PID-based position and attitude control
-- Mission planning utilities
-- Safety features (geofencing, emergency stop)
+### Optional Autonomous Control
+- Example controller available under `iphone_integration/robomaster_control/` (if present)
 
 ### Offline Analysis Tools
 - **Python**: Comprehensive trajectory and error analysis
@@ -48,22 +43,19 @@ iPhone (Sensors) → Raspberry Pi (EKF Processing) → RoboMaster S1 (Control)
 
 ```
 iphone_integration/
-├── pi_phone_connection/      # Raspberry Pi modules
+├── pi_phone_connection/
 │   ├── iphone_sensor_receiver.py
-│   ├── ekf_8dof_formulary.py
-│   └── main_integration.py
-├── offline_analysis/          # Analysis tools
+│   ├── ekf_robomaster_8dof.py
+│   └── main_integration_robomaster.py
+├── robomaster_control/
+├── offline_analysis/
 │   ├── python/
-│   │   └── ekf_analysis.py
 │   └── matlab/
-│       └── ekf_analyzer.m
-├── robomaster_control/        # Autonomous control
-│   └── autonomous_controller.py
-├── config/                    # Configuration files
+├── config/
 │   └── system_config.json
-├── data/                      # Logged data
-├── tests/                     # Test scripts
-└── docs/                      # Documentation
+├── data/
+├── tests/
+└── analysis_results/
 ```
 
 ## Quick Start
@@ -77,11 +69,8 @@ iphone_integration/
 
 #### Raspberry Pi Setup
 ```bash
-# Install dependencies
-pip install numpy pandas matplotlib scipy
-
-# Clone repository
-git clone <repository_url>
+# From repo root
+pip install -r requirements.txt
 cd iphone_integration
 ```
 
@@ -101,35 +90,24 @@ Configure the app to stream to:
 
 ### 3. System Calibration
 
-```python
-# Run calibration (keep iPhone stationary)
-python pi_phone_connection/main_integration.py --calibrate
+```bash
+# Auto-calibration runs on start (keep iPhone stationary)
+python pi_phone_connection/main_integration_robomaster.py
+
+# Skip auto-calibration
+python pi_phone_connection/main_integration_robomaster.py --no-calibrate
 ```
 
 ### 4. Start EKF Processing
 
-```python
+```bash
 # Start the integration system
-python pi_phone_connection/main_integration.py --config config/system_config.json
+python pi_phone_connection/main_integration_robomaster.py --config config/system_config.json
 ```
 
 ### 5. Autonomous Navigation
 
-```python
-from robomaster_control.autonomous_controller import AutonomousController, MissionPlanner
-
-# Create controller
-controller = AutonomousController()
-
-# Create mission
-planner = MissionPlanner()
-waypoints = planner.create_square_path(center=(0, 0), size=2.0, altitude=1.0)
-
-# Execute mission
-controller.set_waypoints(waypoints)
-controller.set_mode(ControlMode.WAYPOINT)
-controller.start()
-```
+If enabled, autonomous control can consume EKF state and issue commands. See `iphone_integration/robomaster_control/`.
 
 ## Configuration
 
@@ -137,29 +115,24 @@ Edit `config/system_config.json` to customize:
 
 ### EKF Parameters
 ```json
-"ekf_8dof": {
-  "update_rate": 50,
-  "process_noise": {
-    "q_position": 0.01,
-    "q_velocity": 0.1,
-    "q_orientation": 0.05,
-    "q_angular_velocity": 0.1
-  }
+"ekf_config": {
+  "q_accel": 0.1,
+  "q_gyro": 0.005,
+  "q_accel_bias": 1e-5,
+  "q_gyro_bias": 1e-4,
+  "r_gps_pos": 0.5,
+  "r_gps_vel": 0.2,
+  "r_yaw": 0.2,
+  "r_nhc": 0.05,
+  "r_zupt": 0.005,
+  "r_zaru": 0.0005
 }
 ```
 
-### Control Parameters
+### Other Parameters
 ```json
-"autonomous_control": {
-  "max_velocity": 1.0,
-  "pid_gains": {
-    "position": {
-      "kp": 1.2,
-      "ki": 0.1,
-      "kd": 0.3
-    }
-  }
-}
+"calibration": { "duration": 5.0, "min_samples": 100, "auto_calibrate": true },
+"logging": { "enabled": true, "rate": 50 }
 ```
 
 ## Data Analysis
@@ -167,7 +140,7 @@ Edit `config/system_config.json` to customize:
 ### Python Analysis
 ```bash
 # Analyze single log file
-python offline_analysis/python/ekf_analysis.py data/iphone_ekf_log_*.csv
+python offline_analysis/python/ekf_analysis.py data/robomaster_ekf_log_*.csv
 
 # Batch analysis
 python offline_analysis/python/ekf_analysis.py data/ --batch
@@ -176,7 +149,7 @@ python offline_analysis/python/ekf_analysis.py data/ --batch
 ### MATLAB Analysis
 ```matlab
 % Load and analyze data
-analyzer = ekf_analyzer('data/iphone_ekf_log_*.csv');
+analyzer = ekf_analyzer('data/robomaster_ekf_log_*.csv');
 analyzer.plot_trajectory_3d();
 analyzer.analyze_performance();
 analyzer.generate_report('output_dir');
@@ -213,11 +186,10 @@ expected_accel = [
 
 ## Performance Metrics
 
-### Typical Performance
-- **Position Accuracy**: ±0.5m (with GPS), ±2m (IMU only)
-- **Orientation Accuracy**: ±2° (roll/pitch), ±5° (yaw)
-- **Update Rate**: 50 Hz (Raspberry Pi 4)
-- **Latency**: <20ms sensor-to-control
+### Typical Performance (indicative)
+- Planar position accuracy depends on GPS availability and motion
+- Yaw stability improved via GPS course, magnetometer, and constraints
+- Update rate ~50 Hz pipeline on Raspberry Pi 4
 
 ### Resource Usage
 - **CPU**: ~30% on Raspberry Pi 4
@@ -238,7 +210,7 @@ expected_accel = [
    - Check sensor mounting
    - Adjust process noise parameters
 
-3. **Control instability**
+3. **Control instability (if autonomous enabled)**
    - Reduce PID gains
    - Lower maximum velocity
    - Check for sensor delays
@@ -255,31 +227,9 @@ Enable verbose logging:
 
 ## API Reference
 
-### EKF8DOF Class
-```python
-ekf = EKF8DOF(config)
-ekf.predict(dt)
-ekf.update_imu(accel, gyro)
-ekf.update_gps(lat, lon, alt)
-state = ekf.get_state()
-```
-
-### AutonomousController Class
-```python
-controller = AutonomousController(config)
-controller.set_waypoints(waypoints)
-controller.set_mode(ControlMode.WAYPOINT)
-controller.start()
-command = controller.get_command()
-```
-
-### iPhoneDataReceiver Class
-```python
-receiver = iPhoneDataReceiver('udp', port=5555)
-receiver.start(callback=data_callback)
-data = receiver.get_latest_data()
-receiver.stop()
-```
+Refer to:
+- `pi_phone_connection/ekf_robomaster_8dof.py` (EKF methods)
+- `pi_phone_connection/iphone_sensor_receiver.py` (receiver/processor APIs)
 
 ## Safety Considerations
 
@@ -317,10 +267,10 @@ For issues and questions:
 ## Changelog
 
 ### Version 1.0.0 (2025)
-- Initial release
+- Initial release for `main_integration_robomaster.py`
 - 8-DOF EKF implementation
 - iPhone sensor integration
-- Autonomous control module
+- Optional autonomous control
 - Offline analysis tools
 
 ---
